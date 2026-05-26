@@ -45,6 +45,7 @@ export async function importLocalSkill(config: LocalConfig, skillId: string, opt
     lastSyncedHash: hash,
     currentRepoHash: hash,
     currentLocalHash: hash,
+    lastUsedAt: null,
     createdAt: now,
     updatedAt: now,
     archivedAt: null

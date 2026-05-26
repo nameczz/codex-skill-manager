@@ -577,11 +577,16 @@ textarea,
   line-height: 1.45;
 }
 
+.settings-stack {
+  display: grid;
+  gap: 16px;
+  max-width: 980px;
+  margin-top: 24px;
+}
+
 .settings-panel {
   display: grid;
   gap: 18px;
-  max-width: 980px;
-  margin-top: 24px;
   padding: 22px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -605,6 +610,48 @@ textarea,
 .settings-paths {
   display: grid;
   gap: 14px;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.hook-summary {
+  display: grid;
+  gap: 8px;
+  align-items: start;
+}
+
+.hook-summary p,
+.hook-warning {
+  margin-bottom: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hook-warning {
+  padding: 10px 12px;
+  border: 1px solid oklch(0.79 0.075 75);
+  border-radius: var(--radius);
+  color: var(--warn-text);
+  background: var(--warn-bg);
+}
+
+.readonly-code {
+  display: block;
+  min-height: 38px;
+  padding: 10px 11px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .advanced-settings {
@@ -847,10 +894,10 @@ textarea,
 .table-head,
 .skill-row {
   display: grid;
-  grid-template-columns: 28px minmax(300px, 1fr) 132px 170px 120px 230px;
+  grid-template-columns: 28px minmax(240px, 1fr) 120px 150px 110px 145px 250px;
   align-items: center;
   gap: 14px;
-  min-width: 1100px;
+  min-width: 1060px;
 }
 
 .table-head {
@@ -866,8 +913,8 @@ textarea,
 
 .skill-row {
   width: 100%;
-  min-height: 58px;
-  padding: 0 14px;
+  min-height: 64px;
+  padding: 10px 14px;
   border: 0;
   border-bottom: 1px solid var(--line);
   color: var(--text);
@@ -1009,6 +1056,7 @@ textarea,
 .row-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   min-width: 0;
 }
@@ -1427,13 +1475,20 @@ textarea,
     padding: 20px;
   }
 
-  .settings-panel {
+  .settings-stack {
     max-width: none;
+  }
+
+  .settings-panel {
     padding: 20px;
   }
 
   .settings-head {
     display: grid;
+  }
+
+  .settings-actions {
+    justify-content: flex-start;
   }
 
   .path-setting {

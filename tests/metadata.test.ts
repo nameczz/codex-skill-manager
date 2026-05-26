@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ensureRepoMetadata } from "../src/metadata.js";
+import { ensureRepoMetadata, readSkillsMetadata } from "../src/metadata.js";
 
 describe("repo metadata", () => {
   it("ignores local Skill Manager cache inside the sync repo", async () => {
@@ -23,5 +23,38 @@ describe("repo metadata", () => {
     await expect(readFile(path.join(syncRepo, ".gitignore"), "utf8")).resolves.toBe(
       "node_modules/\n.codex-skill-manager/\n"
     );
+  });
+
+  it("normalizes older skill metadata records", async () => {
+    const syncRepo = await mkdtemp(path.join(tmpdir(), "csm-metadata-normalize-"));
+    await ensureRepoMetadata(syncRepo);
+    await writeFile(
+      path.join(syncRepo, "metadata", "skills.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        skills: [
+          {
+            id: "legacy",
+            name: "legacy",
+            description: "",
+            localSource: "codex",
+            installed: true,
+            syncState: "clean",
+            lastSyncedHash: "abc",
+            currentRepoHash: "abc",
+            currentLocalHash: "abc",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            archivedAt: null
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const metadata = await readSkillsMetadata(syncRepo);
+
+    expect(metadata.skills[0]?.status).toBe("managed");
+    expect(metadata.skills[0]?.lastUsedAt).toBeNull();
   });
 });

@@ -52,6 +52,28 @@ describe("syncSelectedSkills", () => {
 
     await expect(syncSelectedSkills(config, [{ skillId: "foo", source: "codex" }])).rejects.toThrow("foo is conflict");
   });
+
+  it("commits and pushes repository metadata changes when no skills are selected", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-sync-repo-"));
+    const remote = path.join(root, "remote.git");
+    const config = testConfig(root);
+
+    await ensureRepoMetadata(config.syncRepo);
+    await ensureGitRepository(config.syncRepo);
+    await execFileAsync("git", ["init", "--bare", remote]);
+    await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: config.syncRepo });
+    await writeFile(path.join(config.syncRepo, "metadata", "usage-events.jsonl"), "{\"skillId\":\"foo\",\"invokedAt\":\"2026-01-01T00:00:00.000Z\",\"source\":\"record\"}\n", "utf8");
+
+    const result = await syncSelectedSkills(config, []);
+
+    expect(result.skillIds).toEqual([]);
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(true);
+    expect(result.commitHash).toMatch(/^[0-9a-f]+$/);
+
+    const { stdout } = await execFileAsync("git", ["--git-dir", remote, "log", "--oneline", "--all"]);
+    expect(stdout).toContain("Sync repository changes");
+  });
 });
 
 function testConfig(root: string): LocalConfig {

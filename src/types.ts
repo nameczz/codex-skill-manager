@@ -38,6 +38,7 @@ export type SkillRecord = {
   lastSyncedHash: string | null;
   currentRepoHash: string | null;
   currentLocalHash: string | null;
+  lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -52,6 +53,16 @@ export type UsageEvent = {
   skillId: string;
   invokedAt: string;
   source: "record";
+};
+
+export type UsageHookStatus = {
+  hooksPath: string;
+  installed: boolean;
+  needsUpdate: boolean;
+  installable: boolean;
+  reason: string | null;
+  command: string;
+  installedCommand: string | null;
 };
 
 export type ScannedSkill = {

@@ -1,10 +1,19 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startServer } from "../src/server.js";
+import { ensureGitRepository } from "../src/git.js";
+import { ensureRepoMetadata, readSkillsMetadata, writeSkillsMetadata } from "../src/metadata.js";
+import { hashDirectory } from "../src/hash.js";
+import type { SkillRecord } from "../src/types.js";
 
 const originalEnv = { ...process.env };
+
+beforeEach(async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "csm-server-codex-home-"));
+  process.env.CODEX_HOME = path.join(root, "codex-home");
+});
 
 afterEach(() => {
   process.env = { ...originalEnv };
@@ -255,6 +264,173 @@ describe("server", () => {
 
       expect(response.ok).toBe(true);
       expect(payload).toEqual({ canceled: true });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("blocks pull when the sync repo has uncommitted changes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-pull-blocked-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const config = {
+        syncRepo: path.join(root, "repo"),
+        codexSkillsDir: path.join(root, "codex-skills"),
+        agentsSkillsDir: path.join(root, "agents-skills"),
+        cacheDir: path.join(root, "cache")
+      };
+
+      await fetch(`${server.url}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+      });
+
+      await ensureGitRepository(config.syncRepo);
+      await mkdir(path.join(config.syncRepo, "temp"), { recursive: true });
+      await writeFile(path.join(config.syncRepo, "temp", "touch.txt"), "dirty", "utf8");
+
+      const response = await fetch(`${server.url}/api/pull`, {
+        method: "POST"
+      });
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(500);
+      expect(payload.error).toContain("local uncommitted changes");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("archives a managed skill by moving it in the repo metadata and filesystem", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-archive-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const config = {
+        syncRepo: path.join(root, "repo"),
+        codexSkillsDir: path.join(root, "codex-skills"),
+        agentsSkillsDir: path.join(root, "agents-skills"),
+        cacheDir: path.join(root, "cache")
+      };
+      await fetch(`${server.url}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+      });
+
+      await ensureRepoMetadata(config.syncRepo);
+      await mkdir(path.join(config.syncRepo, "skills", "foo"), { recursive: true });
+      await writeFile(path.join(config.syncRepo, "skills", "foo", "SKILL.md"), "id: foo", "utf8");
+
+      const hash = await hashDirectory(path.join(config.syncRepo, "skills", "foo"));
+      const now = new Date().toISOString();
+      const record: SkillRecord = {
+        id: "foo",
+        name: "foo",
+        description: "",
+        status: "managed",
+        localSource: "codex",
+        installed: false,
+        syncState: "clean",
+        lastSyncedHash: hash,
+        currentRepoHash: hash,
+        currentLocalHash: null,
+        lastUsedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null
+      };
+      await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
+
+      const response = await fetch(`${server.url}/api/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId: "foo" })
+      });
+      const payload = (await response.json()) as { record: SkillRecord };
+
+      expect(response.ok).toBe(true);
+      expect(payload.record.status).toBe("archived");
+      expect(payload.record.archivedAt).toBeTruthy();
+      const metadata = await readSkillsMetadata(config.syncRepo);
+      expect(metadata.skills[0]?.status).toBe("archived");
+      await expect(readFile(path.join(config.syncRepo, "skills", "foo", "SKILL.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(path.join(config.syncRepo, "archive", "foo", "SKILL.md"), "utf8")).resolves.toContain("id: foo");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("records a confirmed usage event", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-record-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const config = {
+        syncRepo: path.join(root, "repo"),
+        codexSkillsDir: path.join(root, "codex-skills"),
+        agentsSkillsDir: path.join(root, "agents-skills"),
+        cacheDir: path.join(root, "cache")
+      };
+      await fetch(`${server.url}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+      });
+
+      const response = await fetch(`${server.url}/api/record`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId: "foo", invokedAt: "2026-01-09T00:00:00.000Z" })
+      });
+      const payload = (await response.json()) as { event: { skillId: string; invokedAt: string; source: string } };
+
+      expect(response.ok).toBe(true);
+      expect(payload.event.skillId).toBe("foo");
+      expect(payload.event.invokedAt).toBe("2026-01-09T00:00:00.000Z");
+      expect(payload.event.source).toBe("record");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("installs and removes the Codex usage hook through the API", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-hook-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+    process.env.CODEX_HOME = path.join(root, "codex-home");
+    process.env.CSM_HOOK_COMMAND = "node /tmp/skill-manager.js record-hook";
+
+    const server = await startServer({ port: 0 });
+    try {
+      const config = {
+        syncRepo: path.join(root, "repo"),
+        codexSkillsDir: path.join(root, "codex-skills"),
+        agentsSkillsDir: path.join(root, "agents-skills"),
+        cacheDir: path.join(root, "cache")
+      };
+      await fetch(`${server.url}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+      });
+
+      const installResponse = await fetch(`${server.url}/api/codex-hook`, { method: "POST" });
+      const installPayload = (await installResponse.json()) as { usageHook: { installed: boolean; hooksPath: string } };
+
+      expect(installResponse.ok).toBe(true);
+      expect(installPayload.usageHook.installed).toBe(true);
+      await expect(readFile(installPayload.usageHook.hooksPath, "utf8")).resolves.toContain("record-hook");
+
+      const removeResponse = await fetch(`${server.url}/api/codex-hook`, { method: "DELETE" });
+      const removePayload = (await removeResponse.json()) as { usageHook: { installed: boolean } };
+
+      expect(removeResponse.ok).toBe(true);
+      expect(removePayload.usageHook.installed).toBe(false);
     } finally {
       await server.close();
     }

@@ -28,13 +28,13 @@ Implement in slices. Do not merge future slices into the current one without use
 Current slice status:
 
 - Slice 1 complete: CLI, config, repo initialization, scanning, metadata, `status`, `import`.
-- Slice 2 next: local Web UI foundation, real API, skills list, detail drawer, import/install actions.
-- Slice 3 later: hash manifest UI, diff state, conflict page.
-- Slice 4 later: Git pull/commit/push one-click Sync.
-- Slice 5 later: `record` and confirmed usage events.
+- Slice 2 complete: local Web UI foundation, real API, skills list, detail drawer, import/install actions.
+- Slice 3 complete: hash-based sync state, local/repo diff states, conflict blocking.
+- Slice 4 complete: Git pull, commit, push, selected-skill sync, and repository metadata sync.
+- Slice 5 complete: `record`, confirmed usage events, and optional Codex `UserPromptSubmit` hook for explicit skill mentions.
 - Slice 6 later: Codex sessions inference cache.
-- Slice 7 later: remove-local, archive, restore, danger zone.
-- Slice 8 later: README polish, CI, npm publish prep.
+- Slice 7 partial: remove-local and archive are implemented; restore and danger-zone redesign are later.
+- Slice 8 later: CI and npm publish prep.
 
 ## UI Rules
 
@@ -74,14 +74,14 @@ Design direction for Slice 2:
 - Local Codex runtime copies live in `~/.codex/skills/<skill-id>/`.
 - Use copy plus hash manifest, not symlink, as the default model.
 - Unmanaged local skills must never be auto-added or auto-pushed.
-- One-click Sync is planned for Slice 4 only.
-- When implemented, one Sync action should produce one commit whose message says which skills were synced and why.
+- One-click Sync produces one commit whose message says which skills or repository metadata were synced and why.
 - Conflicts must block push. Never silently overwrite both-changed local/repo state.
 
 ## Privacy Rules
 
 - Confirmed usage events may be synced to Git, but only with:
   `skillId`, `invokedAt`, `source: "record"`.
+- The Codex hook may parse only the submitted prompt for explicit `SKILL.md` links or paths under configured local skill roots.
 - Do not sync hostnames, cwd, project paths, session ids, log snippets, or inferred evidence.
 - Codex session inference is local-cache only and planned for Slice 6.
 

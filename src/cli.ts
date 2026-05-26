@@ -6,9 +6,14 @@ import { buildStatusReport } from "./status.js";
 import { formatStatus } from "./format.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
-import { gitStatus } from "./git.js";
+import { gitPull, gitStatus } from "./git.js";
 import { startServer } from "./server.js";
 import { syncSelectedSkills } from "./sync.js";
+import { recordUsageEvent } from "./usage.js";
+import { removeLocalSkill } from "./removeLocalSkill.js";
+import { archiveSkill } from "./archiveSkill.js";
+import { updateLocalSkill } from "./updateLocalSkill.js";
+import { getUsageHookStatus, installUsageHook, recordSkillMentionsFromHookInput, removeUsageHook } from "./codexHook.js";
 
 const program = new Command();
 
@@ -72,15 +77,20 @@ program
 
 program
   .command("sync")
-  .argument("<skill-id...>")
-  .description("Commit and push selected skills to the sync repository.")
-  .action(async (skillIds: string[]) => {
+  .argument("[skill-id...]")
+  .description("Commit and push selected skills or repository metadata changes.")
+  .action(async (skillIds: string[] = []) => {
     const config = await loadLocalConfig();
     const result = await syncSelectedSkills(
       config,
       skillIds.map((skillId) => ({ skillId }))
     );
     console.log(result.committed ? `Committed ${result.commitHash}` : "No new commit was needed.");
+    if (result.skillIds.length === 0) {
+      console.log("Pushed repository changes.");
+      return;
+    }
+
     console.log(`Pushed ${result.skillIds.length} skill${result.skillIds.length === 1 ? "" : "s"}: ${result.skillIds.join(", ")}`);
   });
 
@@ -103,10 +113,71 @@ program
 program
   .command("record")
   .argument("<skill-id>")
-  .description("Record a confirmed skill invocation. Implemented in Slice 5.")
-  .action(() => {
-    console.error("record is planned for Slice 5.");
-    process.exitCode = 1;
+  .description("Record a confirmed skill invocation.")
+  .option("--invoked-at <iso>", "Optional invocation time in ISO format")
+  .action(async (skillId, options) => {
+    const config = await loadLocalConfig();
+    const event = await recordUsageEvent(config, skillId, { invokedAt: options.invokedAt });
+    console.log(`Recorded usage for ${event.skillId} at ${event.invokedAt}`);
+  });
+
+program
+  .command("record-hook")
+  .description("Read Codex UserPromptSubmit hook input from stdin and record explicit skill mentions.")
+  .option("--json", "Print recorded skill ids")
+  .action(async (options) => {
+    const raw = await readStdin();
+    const input = parseHookInput(raw);
+    const result = await recordSkillMentionsFromHookInput(input);
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  });
+
+program
+  .command("hook-status")
+  .description("Show Codex usage hook status.")
+  .option("--json", "Print JSON")
+  .action(async (options) => {
+    const config = await loadLocalConfig();
+    const status = await getUsageHookStatus(config);
+    if (options.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+
+    console.log(`Codex hooks: ${status.hooksPath}`);
+    console.log(`Usage hook: ${status.installed ? (status.needsUpdate ? "installed, update available" : "installed") : "not installed"}`);
+    if (!status.installable && status.reason) {
+      console.log(`Install unavailable: ${status.reason}`);
+    }
+  });
+
+program
+  .command("install-codex-hook")
+  .description("Install the Codex UserPromptSubmit hook for explicit skill usage recording.")
+  .action(async () => {
+    const config = await loadLocalConfig();
+    const status = await installUsageHook(config);
+    console.log(`Installed Codex usage hook at ${status.hooksPath}`);
+  });
+
+program
+  .command("remove-codex-hook")
+  .description("Remove the Codex usage hook installed by Skill Manager.")
+  .action(async () => {
+    const config = await loadLocalConfig();
+    const status = await removeUsageHook(config);
+    console.log(`Removed Codex usage hook from ${status.hooksPath}`);
+  });
+
+program
+  .command("pull")
+  .description("Pull latest changes from the sync repository (fast-forward only).")
+  .action(async () => {
+    const config = await loadLocalConfig();
+    await gitPull(config.syncRepo);
+    console.log("Pulled latest changes.");
   });
 
 program
@@ -114,29 +185,80 @@ program
   .argument("<skill-id>")
   .description("Install a managed skill from the sync repository.")
   .option("--force", "Overwrite an existing local copy")
+  .option("--source <source>", "Which local root to install into: codex or agents")
   .action(async (skillId, options) => {
     const config = await loadLocalConfig();
-    const record = await installRepoSkill(config, skillId, { force: options.force });
+    const source = resolveSourceOption(options.source);
+    const record = await installRepoSkill(config, skillId, { force: options.force, source });
     console.log(`Installed ${record.id}`);
+  });
+
+program
+  .command("update-local")
+  .description("Install or overwrite a managed skill from the sync repo.")
+  .argument("<skill-id>")
+  .option("--source <source>", "Which local root to install into: codex or agents")
+  .action(async (skillId, options) => {
+    const config = await loadLocalConfig();
+    const source = resolveSourceOption(options.source);
+    await updateLocalSkill(config, skillId, { source });
+    console.log(`Updated local copy of ${skillId}`);
   });
 
 program
   .command("remove-local")
   .argument("<skill-id>")
-  .description("Remove a managed skill from this machine. Implemented in Slice 7.")
-  .action(() => {
-    console.error("remove-local is planned for Slice 7.");
-    process.exitCode = 1;
+  .description("Remove a managed skill from this machine.")
+  .option("--source <source>", "Which local source to remove from: codex or agents")
+  .action(async (skillId, options) => {
+    const config = await loadLocalConfig();
+    const source = resolveSourceOption(options.source);
+    const record = await removeLocalSkill(config, skillId, { source });
+    console.log(`Removed local skill copy: ${record.id}`);
   });
 
 program
   .command("archive")
   .argument("<skill-id>")
-  .description("Archive a managed skill in the sync repository. Implemented in Slice 7.")
-  .action(() => {
-    console.error("archive is planned for Slice 7.");
-    process.exitCode = 1;
+  .description("Archive a managed skill in the sync repository.")
+  .action(async (skillId) => {
+    const config = await loadLocalConfig();
+    const record = await archiveSkill(config, skillId);
+    console.log(`Archived ${record.id}`);
   });
+
+function resolveSourceOption(value: string | undefined): "codex" | "agents" | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (value === "codex" || value === "agents") {
+    return value;
+  }
+
+  throw new Error(`Invalid source: ${value}. Use "codex" or "agents".`);
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function parseHookInput(raw: string): unknown {
+  if (!raw.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
 
 program.exitOverride();
 

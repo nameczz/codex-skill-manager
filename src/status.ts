@@ -2,18 +2,21 @@ import type { LocalConfig, ScannedSkill, SkillRecord, StatusReport, SyncState } 
 import { repoSkillsDir } from "./paths.js";
 import { readSkillsMetadata } from "./metadata.js";
 import { scanSkills } from "./scanner.js";
+import { getLastUsageBySkill } from "./usage.js";
 
 export async function buildStatusReport(config: LocalConfig): Promise<StatusReport> {
   const metadata = await readSkillsMetadata(config.syncRepo);
+  const managedRecords = metadata.skills.filter((skill) => skill.status === "managed");
   const codexSkills = await scanSkills(config.codexSkillsDir, "codex");
   const agentsSkills = await scanSkills(config.agentsSkillsDir, "agents");
   const localSkills = [...codexSkills, ...agentsSkills].sort(compareScannedSkills);
   const repoSkills = await scanSkills(repoSkillsDir(config.syncRepo), "repo");
   const localById = groupLocalSkills(localSkills);
   const repoById = new Map(repoSkills.map((skill) => [skill.id, skill]));
-  const managedIds = new Set(metadata.skills.map((skill) => skill.id));
+  const managedIds = new Set(managedRecords.map((skill) => skill.id));
+  const lastUsedBySkill = await getLastUsageBySkill(config.syncRepo, managedRecords.map((skill) => skill.id));
 
-  const managed = metadata.skills.map((record) => refreshRecord(record, findLocalSkill(record, localById), repoById.get(record.id)));
+  const managed = managedRecords.map((record) => refreshRecord(record, findLocalSkill(record, localById), repoById.get(record.id), lastUsedBySkill.get(record.id) ?? null));
   const unmanagedLocal = localSkills.filter((skill) => !managedIds.has(skill.id));
   const repoOnly = repoSkills.filter((skill) => !managedIds.has(skill.id));
 
@@ -31,13 +34,19 @@ function compareScannedSkills(a: ScannedSkill, b: ScannedSkill): number {
   return a.id.localeCompare(b.id) || a.source.localeCompare(b.source);
 }
 
-function refreshRecord(record: SkillRecord, local: ScannedSkill | undefined, repo: ScannedSkill | undefined): SkillRecord {
+function refreshRecord(
+  record: SkillRecord,
+  local: ScannedSkill | undefined,
+  repo: ScannedSkill | undefined,
+  lastUsedAt: string | null
+): SkillRecord {
   const currentLocalHash = local?.hash ?? null;
   const currentRepoHash = repo?.hash ?? null;
   const installed = Boolean(local);
 
   return {
     ...record,
+    lastUsedAt,
     name: repo?.name ?? local?.name ?? record.name,
     description: repo?.description ?? local?.description ?? record.description,
     localSource: local?.source === "codex" || local?.source === "agents" ? local.source : record.localSource ?? null,
@@ -61,7 +70,10 @@ function groupLocalSkills(skills: ScannedSkill[]): Map<string, ScannedSkill[]> {
 function findLocalSkill(record: SkillRecord, localById: Map<string, ScannedSkill[]>): ScannedSkill | undefined {
   const candidates = localById.get(record.id) ?? [];
   if (record.localSource) {
-    return candidates.find((skill) => skill.source === record.localSource);
+    const preferred = candidates.find((skill) => skill.source === record.localSource);
+    if (preferred) {
+      return preferred;
+    }
   }
 
   return candidates.find((skill) => skill.source === "codex") ?? candidates.find((skill) => skill.source === "agents");

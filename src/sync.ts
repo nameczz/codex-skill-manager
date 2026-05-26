@@ -28,11 +28,12 @@ type PreparedSkill = {
 };
 
 export async function syncSelectedSkills(config: LocalConfig, selections: SyncSelection[]): Promise<SyncResult> {
-  const prepared = await prepareSelections(config, selections);
-  const remotes = await gitRemotes(config.syncRepo);
-  if (remotes.length === 0) {
-    throw new Error("No Git remote is configured for the sync repository. Add a remote before syncing.");
+  if (selections.length === 0) {
+    return syncRepositoryChanges(config);
   }
+
+  const prepared = await prepareSelections(config, selections);
+  await requireGitRemote(config.syncRepo);
 
   const updatedRepoSkillIds: string[] = [];
 
@@ -65,6 +66,29 @@ export async function syncSelectedSkills(config: LocalConfig, selections: SyncSe
   };
 }
 
+export async function syncRepositoryChanges(config: LocalConfig): Promise<SyncResult> {
+  await requireGitRemote(config.syncRepo);
+
+  const statusBeforeStage = await gitStatus(config.syncRepo);
+  await gitAdd(config.syncRepo, [".gitignore", "metadata", "skills", "archive"]);
+
+  const commitMessage = buildRepositoryCommitMessage(statusBeforeStage);
+  const committed = await gitHasStagedChanges(config.syncRepo);
+  const commitHash = committed ? await gitCommit(config.syncRepo, commitMessage) : null;
+
+  await gitPush(config.syncRepo);
+
+  return {
+    skillIds: [],
+    updatedRepoSkillIds: [],
+    committed,
+    pushed: true,
+    commitHash,
+    commitMessage,
+    gitStatus: await gitStatus(config.syncRepo)
+  };
+}
+
 async function prepareSelections(config: LocalConfig, selections: SyncSelection[]): Promise<PreparedSkill[]> {
   if (selections.length === 0) {
     throw new Error("Select at least one skill before syncing.");
@@ -81,6 +105,11 @@ async function prepareSelections(config: LocalConfig, selections: SyncSelection[
   for (const selection of normalized) {
     const managed = managedById.get(selection.skillId);
     if (managed) {
+      if (managed.status === "archived") {
+        blocked.push(`${managed.id} is archived`);
+        continue;
+      }
+
       const source = selection.source ?? managed.localSource ?? undefined;
       const state = managed.syncState;
 
@@ -118,6 +147,13 @@ async function prepareSelections(config: LocalConfig, selections: SyncSelection[
   }
 
   return prepared;
+}
+
+async function requireGitRemote(syncRepo: string): Promise<void> {
+  const remotes = await gitRemotes(syncRepo);
+  if (remotes.length === 0) {
+    throw new Error("No Git remote is configured for the sync repository. Add a remote before syncing.");
+  }
 }
 
 function findUnmanagedById(skills: Array<{ id: string; source: string }>, skillId: string): { id: string; source: string } | undefined {
@@ -179,6 +215,31 @@ function buildCommitMessage(skillIds: string[], updatedRepoSkillIds: string[]): 
     "",
     updatedRepoSkillIds.length > 0 ? "Updated repo copies from local skills." : "No local skill content changed; pushed existing sync repo state."
   ];
+
+  return lines.join("\n");
+}
+
+function buildRepositoryCommitMessage(status: string): string {
+  const changedLines = status
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lines = [
+    "Sync repository changes",
+    "",
+    "Synced repository metadata, archives, and usage records.",
+    ""
+  ];
+
+  if (changedLines.length > 0) {
+    lines.push("Git changes:");
+    lines.push(...changedLines.slice(0, 24).map((line) => `- ${line}`));
+    if (changedLines.length > 24) {
+      lines.push(`- ... ${changedLines.length - 24} more`);
+    }
+  } else {
+    lines.push("No local repository changes were detected before staging.");
+  }
 
   return lines.join("\n");
 }

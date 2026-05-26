@@ -63,6 +63,14 @@ export async function readSkillsMetadata(syncRepo: string): Promise<SkillsMetada
     throw new Error(`Invalid skills metadata at ${repoSkillsMetadataPath(syncRepo)}.`);
   }
 
+  metadata.skills = metadata.skills.map((record) =>
+    ((candidate) => ({
+      ...candidate,
+      status: candidate.status === "archived" ? "archived" : "managed",
+      lastUsedAt: candidate.lastUsedAt ?? null
+    }))(record)
+  );
+
   return metadata;
 }
 

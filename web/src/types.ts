@@ -20,6 +20,7 @@ export type SkillRecord = {
   lastSyncedHash: string | null;
   currentRepoHash: string | null;
   currentLocalHash: string | null;
+  lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -43,6 +44,16 @@ export type StatusReport = {
   repoOnly: ScannedSkill[];
 };
 
+export type UsageHookStatus = {
+  hooksPath: string;
+  installed: boolean;
+  needsUpdate: boolean;
+  installable: boolean;
+  reason: string | null;
+  command: string;
+  installedCommand: string | null;
+};
+
 export type ApiStatus =
   | {
       configured: false;
@@ -61,6 +72,7 @@ export type ApiStatus =
         agentsSkillsDir: string;
         cacheDir: string;
       };
+      usageHook: UsageHookStatus;
       gitStatus: string;
       report: StatusReport;
     };
@@ -83,11 +95,13 @@ export type SkillRow =
       description: string;
       syncState: SyncState;
       installed: boolean;
+      status: "managed" | "archived";
       source: LocalSkillSource | "repo";
       repoHash: string | null;
       localHash: string | null;
       localPath: string;
       repoPath: string;
+      lastUsedAt: string | null;
       updatedAt: string;
     }
   | {
@@ -102,6 +116,7 @@ export type SkillRow =
       localHash: string;
       localPath: string;
       repoPath: null;
+      lastUsedAt: null;
       updatedAt: null;
     }
   | {
@@ -116,5 +131,6 @@ export type SkillRow =
       localHash: null;
       localPath: null;
       repoPath: string;
+      lastUsedAt: null;
       updatedAt: null;
     };

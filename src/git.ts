@@ -33,7 +33,7 @@ export async function gitAdd(syncRepo: string, paths: string[]): Promise<void> {
     return;
   }
 
-  await runGit(syncRepo, ["add", "--", ...paths]);
+  await runGit(syncRepo, ["add", "-A", "--", ...paths]);
 }
 
 export async function gitHasStagedChanges(syncRepo: string): Promise<boolean> {
@@ -79,6 +79,31 @@ export async function gitPush(syncRepo: string): Promise<void> {
   await runGit(syncRepo, ["push", "-u", remote, branch]);
 }
 
+export async function gitPull(syncRepo: string): Promise<void> {
+  const status = await gitStatus(syncRepo);
+  if (status.trim()) {
+    throw new Error(`Cannot pull: sync repo has local uncommitted changes.\n${status}`);
+  }
+
+  const remotes = await gitRemotes(syncRepo);
+  if (remotes.length === 0) {
+    throw new Error("No Git remote is configured for the sync repository.");
+  }
+
+  const branch = await currentBranch(syncRepo);
+  const remote = remotes.includes("origin") ? "origin" : remotes[0];
+
+  if (await hasUpstream(syncRepo)) {
+    await runGit(syncRepo, ["pull", "--ff-only"]);
+  } else {
+    await runGit(syncRepo, ["pull", "--ff-only", remote, branch]);
+  }
+}
+
+export async function gitHasUncommittedChanges(syncRepo: string): Promise<boolean> {
+  return (await gitStatus(syncRepo)).trim().length > 0;
+}
+
 export async function gitRemotes(syncRepo: string): Promise<string[]> {
   const { stdout } = await runGit(syncRepo, ["remote"]);
   return stdout
@@ -96,7 +121,7 @@ async function currentBranch(syncRepo: string): Promise<string> {
   return branch;
 }
 
-async function hasUpstream(syncRepo: string): Promise<boolean> {
+export async function hasUpstream(syncRepo: string): Promise<boolean> {
   try {
     await runGit(syncRepo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
     return true;

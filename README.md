@@ -2,7 +2,7 @@
 
 Local CLI and Web UI for managing Codex skills across computers with a Git-backed sync repository.
 
-This repository is at Slice 2: CLI setup, sync repository initialization, skill scanning, metadata, status reporting, and the first local Web UI.
+Current scope includes local setup, skill scanning, editable Web UI, Git-backed sync, pull/update flows, archive/remove-local actions, explicit usage recording, and an optional Codex prompt hook for usage timestamps.
 
 ## Commands
 
@@ -11,6 +11,12 @@ yarn install
 npm run build
 node dist/src/cli.js init
 node dist/src/cli.js status
+node dist/src/cli.js pull
+node dist/src/cli.js sync [skill-id...]
+node dist/src/cli.js update-local <skill-id>
+node dist/src/cli.js record <skill-id>
+node dist/src/cli.js install-codex-hook
+node dist/src/cli.js hook-status
 node dist/src/cli.js serve
 ```
 
@@ -19,6 +25,8 @@ During development:
 ```bash
 npm run dev -- init
 npm run dev -- status
+npm run dev -- pull
+npm run dev -- sync [skill-id...]
 npm run dev -- serve
 ```
 
@@ -31,6 +39,31 @@ On macOS, the `Choose` button opens the native folder picker through the local N
 After initialization, use the Settings view to change the sync repository, Codex skills directory, Agents skills directory, or local cache directory. The sync repository is the only path intended for Git commits and pushes. The local cache is machine-specific and should not be synced.
 
 Skills are managed by top-level folders under the configured Codex and Agents skills directories. If a folder such as `gstack/` contains nested `SKILL.md` files, Skill Manager treats `gstack/` as one sync unit and hashes/copies the whole folder.
+
+## Sync Workflow
+
+- `Pull` runs a fast-forward-only Git pull and refuses to run while the sync repo has local uncommitted changes.
+- `Sync selected` commits and pushes selected local skill changes to the sync repository remote.
+- `Sync repo changes` appears when repository metadata, archive, or usage records changed without selected skills.
+- `Install local` restores a missing local skill from the sync repo.
+- `Update local` applies a repo-changed skill to this machine and blocks conflicts.
+- `Archive repo` moves the repo copy under `archive/` and marks metadata as archived. It does not delete the local copy.
+- `Remove local` deletes the skill copy from this machine only. It does not archive or delete the repo copy.
+- `record <skill-id>` writes a privacy-limited usage event containing only `skillId`, `invokedAt`, and `source`.
+
+## Usage Tracking
+
+`record <skill-id>` is the explicit path for confirming a skill was used.
+
+The optional Codex hook installs one `UserPromptSubmit` command into `~/.codex/hooks.json`. It parses the submitted prompt for explicit `SKILL.md` links or paths under the configured Codex and Agents skill directories, then records only the matched `skillId` and timestamp. It does not read transcripts, project paths, hostnames, session ids, or tool output.
+
+Install it from Settings in the Web UI, or run:
+
+```bash
+node dist/src/cli.js install-codex-hook
+```
+
+Codex may ask you to review and trust the hook before it runs. If you are developing from source, build first so the hook can call the compiled CLI.
 
 ## Default Paths
 
@@ -61,3 +94,5 @@ CSM_CODEX_SKILLS_DIR=/tmp/codex-skills \
 CSM_AGENTS_SKILLS_DIR=/tmp/agents-skills \
 npm run dev -- serve
 ```
+
+Use `CODEX_HOME` or `CSM_CODEX_HOME` to test hook installation without touching the real `~/.codex` directory.

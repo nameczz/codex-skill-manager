@@ -9,10 +9,15 @@ import { tryLoadLocalConfig } from "./config.js";
 import { initialize } from "./init.js";
 import { buildStatusReport } from "./status.js";
 import { selectDirectory, type DirectoryPicker } from "./directoryPicker.js";
-import { gitStatus } from "./git.js";
+import { gitPull, gitStatus } from "./git.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
 import { syncSelectedSkills, type SyncSelection } from "./sync.js";
+import { archiveSkill } from "./archiveSkill.js";
+import { removeLocalSkill } from "./removeLocalSkill.js";
+import { recordUsageEvent } from "./usage.js";
+import { updateLocalSkill } from "./updateLocalSkill.js";
+import { getUsageHookStatus, installUsageHook, removeUsageHook } from "./codexHook.js";
 import { getDefaultAgentsSkillsDir, getDefaultCacheDir, getDefaultCodexSkillsDir, resolveSkillPath } from "./paths.js";
 
 export type ServerOptions = {
@@ -80,6 +85,7 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     return {
       configured: true,
       config,
+      usageHook: await getUsageHookStatus(config),
       gitStatus: await gitStatus(config.syncRepo),
       report
     };
@@ -102,7 +108,8 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     return {
       configured: true,
       gitInitialized: result.gitInitialized,
-      config: result.config
+      config: result.config,
+      usageHook: await getUsageHookStatus(result.config)
     };
   });
 
@@ -120,6 +127,7 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
       configured: true,
       gitInitialized: result.gitInitialized,
       config: result.config,
+      usageHook: await getUsageHookStatus(result.config),
       gitStatus: await gitStatus(result.config.syncRepo),
       report: await buildStatusReport(result.config)
     };
@@ -140,8 +148,60 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
   app.post<{ Body: SkillActionBody }>("/api/install", async (request) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
-    const record = await installRepoSkill(loaded, skillId, { force: request.body.force });
+    const source = optionalLocalSource(request.body.source);
+    const record = await installRepoSkill(loaded, skillId, { force: request.body.force, source });
     return { record };
+  });
+
+  app.post<{ Body: SkillActionBody }>("/api/update-local", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const source = optionalLocalSource(request.body.source);
+    const record = await updateLocalSkill(loaded, skillId, { source });
+    return { record };
+  });
+
+  app.post<{ Body: SkillActionBody }>("/api/remove-local", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const source = optionalLocalSource(request.body.source);
+    const record = await removeLocalSkill(loaded, skillId, { source });
+    return { record };
+  });
+
+  app.post<{ Body: SkillActionBody }>("/api/archive", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const record = await archiveSkill(loaded, skillId);
+    return { record };
+  });
+
+  app.post<{ Body: { skillId?: string; invokedAt?: string } }>("/api/record", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const event = await recordUsageEvent(loaded, skillId, { invokedAt: optionalDate(request.body?.invokedAt) });
+    return { event };
+  });
+
+  app.post("/api/pull", async () => {
+    const loaded = requireConfig(config);
+    await gitPull(loaded.syncRepo);
+    return { pulled: true, gitStatus: await gitStatus(loaded.syncRepo) };
+  });
+
+  app.get("/api/codex-hook", async () => {
+    const loaded = requireConfig(config);
+    return { usageHook: await getUsageHookStatus(loaded) };
+  });
+
+  app.post("/api/codex-hook", async () => {
+    const loaded = requireConfig(config);
+    return { usageHook: await installUsageHook(loaded) };
+  });
+
+  app.delete("/api/codex-hook", async () => {
+    const loaded = requireConfig(config);
+    return { usageHook: await removeUsageHook(loaded) };
   });
 
   app.post<{ Body: SkillActionBody }>("/api/skill-file", async (request) => {
@@ -254,6 +314,27 @@ function optionalPath(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalDate(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw httpError(400, "invokedAt must be an ISO timestamp.");
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  if (Number.isNaN(new Date(trimmed).getTime())) {
+    throw httpError(400, "invokedAt must be an ISO timestamp.");
+  }
+
+  return trimmed;
 }
 
 function optionalTitle(value: unknown): string | undefined {

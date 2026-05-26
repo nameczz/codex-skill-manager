@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Clock3,
+  CloudDownload,
   Download,
   FilePenLine,
   FolderGit2,
@@ -18,9 +19,10 @@ import {
   Search,
   Settings,
   ShieldAlert,
+  Trash2,
   X
 } from "lucide-react";
-import type { ApiStatus, LocalSkillSource, SkillRow, StatusReport, SyncResult } from "./types";
+import type { ApiStatus, LocalSkillSource, SkillRow, StatusReport, SyncResult, UsageHookStatus } from "./types";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
@@ -146,11 +148,13 @@ export function App() {
   }, [checkedRowKeys, rows]);
   const importableSelectedRows = selectedRows.filter(canAddToSync);
   const installableSelectedRows = selectedRows.filter(canInstallLocal);
+  const updatableSelectedRows = selectedRows.filter(canUpdateLocal);
   const visibleRowsSelected = filteredRows.length > 0 && filteredRows.every((row) => checkedRowKeys.includes(rowKey(row)));
   const someVisibleRowsSelected = filteredRows.some((row) => checkedRowKeys.includes(rowKey(row)));
   const configured = status?.configured === true;
   const activeView = configured ? view : "skills";
   const report = configured ? status.report : null;
+  const repoHasPendingChanges = configured && status.gitStatus.trim().length > 0;
   const cleanCount = rows.filter((row) => row.syncState === "clean").length;
   const reviewCount = rows.filter((row) => row.syncState !== "clean").length;
   const setupRepoSelected = setupPaths.syncRepo.trim().length > 0;
@@ -292,7 +296,14 @@ export function App() {
     }
   }
 
-  async function runSkillAction(endpoint: "import" | "install", row: SkillRow) {
+  async function runSkillAction(
+    endpoint: "import" | "install" | "update-local" | "archive" | "remove-local",
+    row: SkillRow
+  ) {
+    if (!confirmSkillAction(endpoint, row)) {
+      return;
+    }
+
     setError(null);
     setNotice(null);
     setBusyId(actionBusyId(endpoint, row));
@@ -314,7 +325,7 @@ export function App() {
     }
   }
 
-  async function runBulkAction(endpoint: "import" | "install", targetRows: SkillRow[]) {
+  async function runBulkAction(endpoint: "import" | "install" | "update-local", targetRows: SkillRow[]) {
     if (targetRows.length === 0) {
       return;
     }
@@ -339,6 +350,74 @@ export function App() {
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Bulk action failed.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function pullFromRemote() {
+    setError(null);
+    setNotice(null);
+    setBusyId("pull");
+    try {
+      const response = await fetch("/api/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      await refresh();
+      setNotice("Pulled latest changes from sync repository.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Pull failed.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function installCodexHook() {
+    setError(null);
+    setNotice(null);
+    setBusyId("hook-install");
+    try {
+      const response = await fetch("/api/codex-hook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      const payload = (await response.json()) as { usageHook: UsageHookStatus };
+      setStatus((current) => (current?.configured ? { ...current, usageHook: payload.usageHook } : current));
+      setNotice(payload.usageHook.needsUpdate ? "Codex usage hook needs another install attempt." : "Codex usage hook installed.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to install Codex hook.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function removeCodexHook() {
+    setError(null);
+    setNotice(null);
+    setBusyId("hook-remove");
+    try {
+      const response = await fetch("/api/codex-hook", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      const payload = (await response.json()) as { usageHook: UsageHookStatus };
+      setStatus((current) => (current?.configured ? { ...current, usageHook: payload.usageHook } : current));
+      setNotice("Codex usage hook removed.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to remove Codex hook.");
     } finally {
       setBusyId(null);
     }
@@ -414,7 +493,7 @@ export function App() {
   }
 
   async function runSyncSelected() {
-    if (!configured || selectedRows.length === 0 || busyId !== null) {
+    if (!configured || busyId !== null || (selectedRows.length === 0 && !repoHasPendingChanges)) {
       return;
     }
 
@@ -525,14 +604,24 @@ export function App() {
               Refresh
             </Button>
             <Button
+              variant="secondary"
+              size="sm"
+              type="button"
+              onClick={() => void pullFromRemote()}
+              disabled={!configured || activeView !== "skills" || busyId !== null}
+            >
+              {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
+              Pull
+            </Button>
+            <Button
               variant="primary"
               size="sm"
               type="button"
               onClick={() => void runSyncSelected()}
-              disabled={!configured || activeView !== "skills" || busyId !== null || selectedRows.length === 0}
+              disabled={!configured || activeView !== "skills" || busyId !== null || (selectedRows.length === 0 && !repoHasPendingChanges)}
             >
               {busyId === "sync" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
-              Sync selected
+              {selectedRows.length > 0 ? "Sync selected" : repoHasPendingChanges ? "Sync repo changes" : "Sync selected"}
             </Button>
           </div>
         </header>
@@ -641,11 +730,14 @@ export function App() {
         {configured && activeView === "settings" ? (
           <SettingsPanel
             paths={setupPaths}
+            usageHook={status.usageHook}
             busyId={busyId}
             selectingPath={selectingPath}
             onPathChange={(field, value) => setSetupPaths((current) => ({ ...current, [field]: value }))}
             onChoose={(field, title) => void chooseDirectory(field, title)}
             onSave={() => void saveSettings()}
+            onInstallHook={() => void installCodexHook()}
+            onRemoveHook={() => void removeCodexHook()}
           />
         ) : null}
 
@@ -725,6 +817,19 @@ export function App() {
                   {busyId === "bulk:install" ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
                   Install local ({installableSelectedRows.length})
                 </Button>
+                <Button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => void runBulkAction("update-local", updatableSelectedRows)}
+                  disabled={busyId !== null || updatableSelectedRows.length === 0}
+                >
+                  {busyId === "bulk:update-local" ? (
+                    <Loader2 className="spin" size={14} aria-hidden="true" />
+                  ) : (
+                    <Download size={14} aria-hidden="true" />
+                  )}
+                  Update local ({updatableSelectedRows.length})
+                </Button>
                 <Button className="button ghost" variant="ghost" size="sm" type="button" onClick={() => setCheckedRowKeys([])} disabled={busyId !== null}>
                   <X size={14} aria-hidden="true" />
                   Clear
@@ -747,6 +852,7 @@ export function App() {
                   <span>Source</span>
                   <span>State</span>
                   <span>Local copy</span>
+                  <span>Last used</span>
                   <span>Action</span>
                 </div>
 
@@ -796,6 +902,7 @@ export function App() {
                     <span className={row.installed ? "install-state installed" : "install-state"}>
                       {row.installed ? "Installed" : "Missing"}
                     </span>
+                    <span>{formatLastUsed(row.lastUsedAt)}</span>
                     <RowAction row={row} busyId={busyId} onAction={runSkillAction} onEdit={openSkillEditor} />
                   </div>
                 ))}
@@ -827,99 +934,165 @@ export function App() {
 
 function SettingsPanel({
   paths,
+  usageHook,
   busyId,
   selectingPath,
   onPathChange,
   onChoose,
-  onSave
+  onSave,
+  onInstallHook,
+  onRemoveHook
 }: {
   paths: SetupPaths;
+  usageHook: UsageHookStatus;
   busyId: string | null;
   selectingPath: SetupPathField | null;
   onPathChange: (field: keyof SetupPaths, value: string) => void;
   onChoose: (field: keyof SetupPaths, title: string) => void;
   onSave: () => void;
+  onInstallHook: () => void;
+  onRemoveHook: () => void;
 }) {
   const saving = busyId === "save-config";
+  const installingHook = busyId === "hook-install";
+  const removingHook = busyId === "hook-remove";
 
   return (
-    <Card className="settings-panel" aria-labelledby="settings-title">
-      <CardHeader className="settings-head">
-        <div>
-          <p className="eyebrow">Local configuration</p>
-          <CardTitle id="settings-title">Paths</CardTitle>
-        </div>
-        <Button variant="primary" type="button" onClick={onSave} disabled={saving}>
-          {saving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <FolderGit2 size={15} aria-hidden="true" />}
-          Save paths
-        </Button>
-      </CardHeader>
-
-      <CardContent className="settings-paths">
-        <PathSetting
-          title="Git sync repository"
-          body="Tracked by Git. Skills, metadata, and future sync commits live here."
-          input={
-            <PathInput
-              id="settings-sync-repo-path"
-              label="Path"
-              value={paths.syncRepo}
-              onChange={(value) => onPathChange("syncRepo", value)}
-              onChoose={() => onChoose("syncRepo", "Choose a sync repository directory")}
-              choosing={selectingPath === "syncRepo"}
-            />
-          }
-        />
-        <details className="advanced-settings">
-          <summary>Advanced local paths</summary>
-          <div className="advanced-settings-body">
-            <PathSetting
-              title="Codex skills directory"
-              body="Local Codex skills on this machine. Usually ~/.codex/skills."
-              input={
-                <PathInput
-                  id="settings-codex-skills-path"
-                  label="Path"
-                  value={paths.codexSkillsDir}
-                  onChange={(value) => onPathChange("codexSkillsDir", value)}
-                  onChoose={() => onChoose("codexSkillsDir", "Choose a Codex skills directory")}
-                  choosing={selectingPath === "codexSkillsDir"}
-                />
-              }
-            />
-            <PathSetting
-              title="Agents skills directory"
-              body="Local skills used by the agents skill system. Usually ~/.agents/skills."
-              input={
-                <PathInput
-                  id="settings-agents-skills-path"
-                  label="Path"
-                  value={paths.agentsSkillsDir}
-                  onChange={(value) => onPathChange("agentsSkillsDir", value)}
-                  onChoose={() => onChoose("agentsSkillsDir", "Choose an Agents skills directory")}
-                  choosing={selectingPath === "agentsSkillsDir"}
-                />
-              }
-            />
-            <PathSetting
-              title="Local cache directory"
-              body="Local-only app state. Defaults to ~/.codex-skill-manager/cache and is never meant for Git sync."
-              input={
-                <PathInput
-                  id="settings-cache-path"
-                  label="Path"
-                  value={paths.cacheDir}
-                  onChange={(value) => onPathChange("cacheDir", value)}
-                  onChoose={() => onChoose("cacheDir", "Choose a local cache directory")}
-                  choosing={selectingPath === "cacheDir"}
-                />
-              }
-            />
+    <div className="settings-stack">
+      <Card className="settings-panel" aria-labelledby="settings-title">
+        <CardHeader className="settings-head">
+          <div>
+            <p className="eyebrow">Local configuration</p>
+            <CardTitle id="settings-title">Paths</CardTitle>
           </div>
-        </details>
-      </CardContent>
-    </Card>
+          <Button variant="primary" type="button" onClick={onSave} disabled={saving}>
+            {saving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <FolderGit2 size={15} aria-hidden="true" />}
+            Save paths
+          </Button>
+        </CardHeader>
+
+        <CardContent className="settings-paths">
+          <PathSetting
+            title="Git sync repository"
+            body="Tracked by Git. Skills, metadata, and future sync commits live here."
+            input={
+              <PathInput
+                id="settings-sync-repo-path"
+                label="Path"
+                value={paths.syncRepo}
+                onChange={(value) => onPathChange("syncRepo", value)}
+                onChoose={() => onChoose("syncRepo", "Choose a sync repository directory")}
+                choosing={selectingPath === "syncRepo"}
+              />
+            }
+          />
+          <details className="advanced-settings">
+            <summary>Advanced local paths</summary>
+            <div className="advanced-settings-body">
+              <PathSetting
+                title="Codex skills directory"
+                body="Local Codex skills on this machine. Usually ~/.codex/skills."
+                input={
+                  <PathInput
+                    id="settings-codex-skills-path"
+                    label="Path"
+                    value={paths.codexSkillsDir}
+                    onChange={(value) => onPathChange("codexSkillsDir", value)}
+                    onChoose={() => onChoose("codexSkillsDir", "Choose a Codex skills directory")}
+                    choosing={selectingPath === "codexSkillsDir"}
+                  />
+                }
+              />
+              <PathSetting
+                title="Agents skills directory"
+                body="Local skills used by the agents skill system. Usually ~/.agents/skills."
+                input={
+                  <PathInput
+                    id="settings-agents-skills-path"
+                    label="Path"
+                    value={paths.agentsSkillsDir}
+                    onChange={(value) => onPathChange("agentsSkillsDir", value)}
+                    onChoose={() => onChoose("agentsSkillsDir", "Choose an Agents skills directory")}
+                    choosing={selectingPath === "agentsSkillsDir"}
+                  />
+                }
+              />
+              <PathSetting
+                title="Local cache directory"
+                body="Local-only app state. Defaults to ~/.codex-skill-manager/cache and is never meant for Git sync."
+                input={
+                  <PathInput
+                    id="settings-cache-path"
+                    label="Path"
+                    value={paths.cacheDir}
+                    onChange={(value) => onPathChange("cacheDir", value)}
+                    onChoose={() => onChoose("cacheDir", "Choose a local cache directory")}
+                    choosing={selectingPath === "cacheDir"}
+                  />
+                }
+              />
+            </div>
+          </details>
+        </CardContent>
+      </Card>
+
+      <Card className="settings-panel" aria-labelledby="usage-hook-title">
+        <CardHeader className="settings-head">
+          <div>
+            <p className="eyebrow">Usage tracking</p>
+            <CardTitle id="usage-hook-title">Codex hook</CardTitle>
+          </div>
+          <div className="settings-actions">
+            <Button
+              variant="primary"
+              type="button"
+              onClick={onInstallHook}
+              disabled={installingHook || removingHook || !usageHook.installable}
+            >
+              {installingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Clock3 size={15} aria-hidden="true" />}
+              {usageHook.installed ? (usageHook.needsUpdate ? "Update hook" : "Reinstall hook") : "Install hook"}
+            </Button>
+            <Button
+              variant="secondary"
+              type="button"
+              onClick={onRemoveHook}
+              disabled={installingHook || removingHook || !usageHook.installed}
+            >
+              {removingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+              Remove
+            </Button>
+          </div>
+        </CardHeader>
+
+        <CardContent className="settings-paths">
+          <div className="hook-summary">
+            <Badge variant={usageHook.installed && !usageHook.needsUpdate ? "success" : "warning"}>
+              {usageHook.installed ? (usageHook.needsUpdate ? "Update available" : "Installed") : "Not installed"}
+            </Badge>
+            <p>
+              Records explicit skill file mentions from Codex prompts through a UserPromptSubmit hook. It writes only the
+              skill id and timestamp to the sync repository usage log.
+            </p>
+          </div>
+          {usageHook.reason ? <p className="hook-warning">{usageHook.reason}</p> : null}
+          <PathSetting
+            title="Hook config"
+            body="Skill Manager merges one UserPromptSubmit command into this file and leaves other hooks in place."
+            input={<ReadOnlyCode value={usageHook.hooksPath} />}
+          />
+          <PathSetting
+            title="Command"
+            body="Codex will ask you to trust this hook before it runs."
+            input={<ReadOnlyCode value={usageHook.command || usageHook.installedCommand || "Build the CLI before installing."} />}
+          />
+        </CardContent>
+      </Card>
+    </div>
   );
+}
+
+function ReadOnlyCode({ value }: { value: string }) {
+  return <code className="readonly-code">{value}</code>;
 }
 
 function PathSetting({ title, body, input }: { title: string; body: string; input: ReactNode }) {
@@ -1014,11 +1187,13 @@ function buildRows(report: StatusReport): SkillRow[] {
     id: skill.id,
     name: skill.name,
     description: skill.description,
+    status: skill.status,
     syncState: skill.syncState,
     installed: skill.installed,
     source: skill.localSource ?? "codex",
     repoHash: skill.currentRepoHash,
     localHash: skill.currentLocalHash,
+    lastUsedAt: skill.lastUsedAt,
     repoPath: `${report.syncRepo}/skills/${skill.id}`,
     localPath: `${localRootForSource(report, skill.localSource ?? "codex")}/${skill.id}`,
     updatedAt: skill.updatedAt
@@ -1034,6 +1209,7 @@ function buildRows(report: StatusReport): SkillRow[] {
     installed: true,
     repoHash: null,
     localHash: skill.hash,
+    lastUsedAt: null,
     repoPath: null,
     localPath: skill.path,
     updatedAt: null
@@ -1049,6 +1225,7 @@ function buildRows(report: StatusReport): SkillRow[] {
     installed: false,
     repoHash: skill.hash,
     localHash: null,
+    lastUsedAt: null,
     repoPath: skill.path,
     localPath: null,
     updatedAt: null
@@ -1070,11 +1247,23 @@ function canAddToSync(row: SkillRow) {
 }
 
 function canInstallLocal(row: SkillRow) {
-  return row.kind === "managed" && !row.installed && Boolean(row.repoHash);
+  return row.kind === "managed" && row.syncState === "missing_local" && !row.installed && Boolean(row.repoHash);
+}
+
+function canUpdateLocal(row: SkillRow) {
+  return row.kind === "managed" && row.syncState === "repo_modified";
 }
 
 function canEditLocal(row: SkillRow) {
   return row.installed && (row.source === "codex" || row.source === "agents") && Boolean(row.localPath);
+}
+
+function canArchive(row: SkillRow) {
+  return row.kind === "managed";
+}
+
+function canRemoveLocal(row: SkillRow) {
+  return row.installed && (row.source === "codex" || row.source === "agents");
 }
 
 function skillActionBody(row: SkillRow): { skillId: string; source?: LocalSkillSource } {
@@ -1086,6 +1275,14 @@ function syncActionBody(rows: SkillRow[]): { skills: Array<{ skillId: string; so
 }
 
 function syncResultMessage(result: SyncResult) {
+  if (result.skillIds.length === 0) {
+    if (result.committed && result.commitHash) {
+      return `Synced repository changes. Commit ${result.commitHash} was pushed.`;
+    }
+
+    return "No new repository commit was needed. Remote is up to date.";
+  }
+
   const target = result.skillIds.length === 1 ? result.skillIds[0] : `${result.skillIds.length} skills`;
   if (result.committed && result.commitHash) {
     return `Synced ${target}. Commit ${result.commitHash} was pushed.`;
@@ -1094,8 +1291,20 @@ function syncResultMessage(result: SyncResult) {
   return `No new commit was needed. Pushed ${target}.`;
 }
 
-function actionBusyId(endpoint: "import" | "install", row: SkillRow) {
+function actionBusyId(endpoint: "import" | "install" | "update-local" | "archive" | "remove-local", row: SkillRow) {
   return `${endpoint}:${rowKey(row)}`;
+}
+
+function confirmSkillAction(endpoint: "import" | "install" | "update-local" | "archive" | "remove-local", row: SkillRow) {
+  if (endpoint === "archive") {
+    return window.confirm(`Archive "${row.name || row.id}" in the sync repository? The local copy is not removed.`);
+  }
+
+  if (endpoint === "remove-local") {
+    return window.confirm(`Remove the local copy of "${row.name || row.id}" from this machine? The sync repository copy is not archived.`);
+  }
+
+  return true;
 }
 
 function StatusTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "good" | "risk" }) {
@@ -1138,13 +1347,19 @@ function RowAction({
 }: {
   row: SkillRow;
   busyId: string | null;
-  onAction: (endpoint: "import" | "install", row: SkillRow) => Promise<void>;
+  onAction: (
+    endpoint: "import" | "install" | "update-local" | "archive" | "remove-local",
+    row: SkillRow
+  ) => Promise<void>;
   onEdit: (row: SkillRow) => Promise<void>;
 }) {
   const importBusy = busyId === actionBusyId("import", row);
   const installBusy = busyId === actionBusyId("install", row);
+  const updateBusy = busyId === actionBusyId("update-local", row);
+  const archiveBusy = busyId === actionBusyId("archive", row);
+  const removeBusy = busyId === actionBusyId("remove-local", row);
   const editBusy = busyId === `editor-open:${rowKey(row)}`;
-  const hasAction = canEditLocal(row) || canAddToSync(row) || canInstallLocal(row);
+  const hasAction = canEditLocal(row) || canAddToSync(row) || canInstallLocal(row) || canUpdateLocal(row) || canArchive(row) || canRemoveLocal(row);
 
   if (!hasAction) {
     return <span className="row-actions muted">View</span>;
@@ -1197,7 +1412,55 @@ function RowAction({
           disabled={busyId !== null && !installBusy}
         >
           {installBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
-          Install
+          Install local
+        </Button>
+      ) : null}
+      {canUpdateLocal(row) ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="row-action"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onAction("update-local", row);
+          }}
+          disabled={busyId !== null && !updateBusy}
+        >
+          {updateBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
+          Update local
+        </Button>
+      ) : null}
+      {canArchive(row) ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="row-action"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onAction("archive", row);
+          }}
+          disabled={busyId !== null && !archiveBusy}
+        >
+          {archiveBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Archive size={14} aria-hidden="true" />}
+          Archive repo
+        </Button>
+      ) : null}
+      {canRemoveLocal(row) ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="row-action"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onAction("remove-local", row);
+          }}
+          disabled={busyId !== null && !removeBusy}
+        >
+          {removeBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
+          Remove local
         </Button>
       ) : null}
     </span>
@@ -1235,6 +1498,7 @@ function DetailDrawer({
           <DetailField label="Source" value={sourceLabel(selected.source)} />
           <DetailField label="Local copy" value={selected.installed ? "Installed" : "Missing"} />
           <DetailField label="Sync state" value={syncLabel(selected.syncState)} />
+          <DetailField label="Last used" value={formatLastUsed(selected.lastUsedAt)} />
           <DetailField label="Updated" value={formatTimestamp(selected.updatedAt)} />
         </div>
 
@@ -1413,6 +1677,37 @@ function formatTimestamp(value: string | null) {
   }
 
   return date.toLocaleString();
+}
+
+function formatLastUsed(lastUsedAt: string | null) {
+  if (!lastUsedAt) {
+    return "Never";
+  }
+
+  const parsed = new Date(lastUsedAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return lastUsedAt;
+  }
+
+  return `${parsed.toLocaleString()} (${formatAge(parsed)})`;
+}
+
+function formatAge(date: Date): string {
+  const now = Date.now();
+  const ageMs = Math.max(0, now - date.getTime());
+  const minutes = Math.floor(ageMs / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days >= 1) {
+    return `${days} day${days === 1 ? "" : "s"} ago`;
+  }
+
+  if (hours >= 1) {
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  }
+
+  return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
 }
 
 async function readError(response: Response) {

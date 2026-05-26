@@ -10,6 +10,7 @@ import { readSkillFrontmatter } from "./frontmatter.js";
 
 export type InstallOptions = {
   force?: boolean;
+  source?: LocalSkillSource;
 };
 
 export async function installRepoSkill(config: LocalConfig, skillId: string, options: InstallOptions = {}): Promise<SkillRecord> {
@@ -22,7 +23,7 @@ export async function installRepoSkill(config: LocalConfig, skillId: string, opt
   }
 
   const sourcePath = resolveSkillPath(repoSkillsDir(config.syncRepo), id);
-  const localSource = existing.localSource ?? "codex";
+  const localSource = options.source ?? existing.localSource ?? "codex";
   const targetPath = resolveSkillPath(localRootForSource(config, localSource), id);
 
   if (!existsSync(path.join(sourcePath, "SKILL.md"))) {
@@ -51,6 +52,7 @@ export async function installRepoSkill(config: LocalConfig, skillId: string, opt
     lastSyncedHash: hash,
     currentRepoHash: hash,
     currentLocalHash: hash,
+    lastUsedAt: existing.lastUsedAt ?? null,
     updatedAt: now
   };
 

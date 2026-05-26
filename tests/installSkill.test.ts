@@ -41,6 +41,7 @@ describe("installRepoSkill", () => {
       lastSyncedHash: hash,
       currentRepoHash: hash,
       currentLocalHash: null,
+      lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
       archivedAt: null
@@ -90,6 +91,7 @@ describe("installRepoSkill", () => {
       lastSyncedHash: hash,
       currentRepoHash: hash,
       currentLocalHash: null,
+      lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
       archivedAt: null
