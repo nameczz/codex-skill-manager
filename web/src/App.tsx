@@ -81,7 +81,7 @@ type SetupPaths = {
   cacheDir: string;
 };
 type SetupPathField = keyof SetupPaths | "setupRoot";
-type View = "skills" | "settings" | "archive";
+type View = "skills" | "sync" | "usage" | "settings" | "archive";
 type EditorState = {
   rowKey: string;
   source: LocalSkillSource;
@@ -247,6 +247,16 @@ export function App() {
   const importableSelectedRows = selectedRows.filter(canAddToSync);
   const installableSelectedRows = selectedRows.filter(canInstallLocal);
   const updatableSelectedRows = selectedRows.filter(canUpdateLocal);
+  const repoInstallRows = rows.filter(canInstallLocal);
+  const repoUpdateRows = rows.filter(canUpdateLocal);
+  const repoApplyCount = repoInstallRows.length + repoUpdateRows.length;
+  const localChangeRows = rows.filter((row) => row.syncState === "local_modified" || row.syncState === "missing_repo");
+  const conflictRows = rows.filter((row) => row.syncState === "conflict");
+  const unmanagedRows = rows.filter((row) => row.kind === "unmanaged");
+  const usageRows = useMemo(() => rows.filter((row) => row.installed).sort(compareUsageRows), [rows]);
+  const usedRows = usageRows.filter((row) => row.lastUsedAt !== null);
+  const neverUsedRows = usageRows.filter((row) => row.lastUsedAt === null);
+  const staleUsageRows = usageRows.filter(isStaleUsageRow);
   const visibleRowsSelected = activeView === "skills" && pageRows.length > 0 && pageRows.every((row) => checkedRowKeys.includes(rowKey(row)));
   const someVisibleRowsSelected = activeView === "skills" && pageRows.some((row) => checkedRowKeys.includes(rowKey(row)));
   const cleanCount = rows.filter((row) => row.syncState === "clean").length;
@@ -437,14 +447,13 @@ export function App() {
   }
 
   async function confirmPendingAction() {
-    if (!pendingAction) {
+    const action = pendingAction;
+    if (!action) {
       return;
     }
 
-    const completed = await runSkillAction(pendingAction.endpoint, pendingAction.row);
-    if (completed) {
-      setPendingAction(null);
-    }
+    setPendingAction(null);
+    void runSkillAction(action.endpoint, action.row);
   }
 
   function requestRestore(row: ArchiveRow) {
@@ -485,14 +494,13 @@ export function App() {
   }
 
   async function confirmPendingRestore() {
-    if (!pendingRestore) {
+    const restoreRow = pendingRestore;
+    if (!restoreRow) {
       return;
     }
 
-    const completed = await runRestoreArchived(pendingRestore);
-    if (completed) {
-      setPendingRestore(null);
-    }
+    setPendingRestore(null);
+    void runRestoreArchived(restoreRow);
   }
 
   async function runBulkAction(endpoint: "import" | "install" | "update-local", targetRows: SkillRow[]) {
@@ -504,16 +512,7 @@ export function App() {
     setNotice(null);
     setBusyId(`bulk:${endpoint}`);
     try {
-      const response = await fetch("/api/bulk-action", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ endpoint, skills: targetRows.map(skillActionBody) })
-      });
-      if (!response.ok) {
-        throw new Error(await readError(response));
-      }
-
-      const payload = (await response.json()) as { result?: SyncResult; dependencyInstalls?: Array<DependencyInstallInfo & { skillId: string }> };
+      const payload = await requestBulkAction(endpoint, targetRows);
       const messages: string[] = [];
       if (payload.result) {
         messages.push(syncResultMessage(payload.result));
@@ -535,14 +534,67 @@ export function App() {
     }
   }
 
+  async function applyRepoChangesToLocal() {
+    if (repoApplyCount === 0) {
+      return;
+    }
+
+    setError(null);
+    setNotice(null);
+    setBusyId("apply-repo");
+    try {
+      const messages: string[] = [];
+      let installedDependencyCount = 0;
+
+      if (repoInstallRows.length > 0) {
+        const payload = await requestBulkAction("install", repoInstallRows);
+        if (payload.result) {
+          messages.push(syncResultMessage(payload.result));
+        }
+        installedDependencyCount += payload.dependencyInstalls?.filter((install) => install.status === "installed").length ?? 0;
+      }
+
+      if (repoUpdateRows.length > 0) {
+        const payload = await requestBulkAction("update-local", repoUpdateRows);
+        if (payload.result) {
+          messages.push(syncResultMessage(payload.result));
+        }
+        installedDependencyCount += payload.dependencyInstalls?.filter((install) => install.status === "installed").length ?? 0;
+      }
+
+      if (installedDependencyCount > 0) {
+        messages.push(`Installed dependencies for ${installedDependencyCount} skill${installedDependencyCount === 1 ? "" : "s"}.`);
+      }
+
+      setNotice(messages.length > 0 ? messages.join(" ") : "Applied repository changes to local skills.");
+      await refresh({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Apply repo changes failed.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function requestBulkAction(endpoint: "import" | "install" | "update-local", targetRows: SkillRow[]) {
+    const response = await fetch("/api/bulk-action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint, skills: targetRows.map(skillActionBody) })
+    });
+    if (!response.ok) {
+      throw new Error(await readError(response));
+    }
+
+    return (await response.json()) as { result?: SyncResult; dependencyInstalls?: Array<DependencyInstallInfo & { skillId: string }> };
+  }
+
   async function pullFromRemote() {
     setError(null);
     setNotice(null);
     setBusyId("pull");
     try {
       const response = await fetch("/api/pull", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" }
+        method: "POST"
       });
       if (!response.ok) {
         throw new Error(await readError(response));
@@ -563,8 +615,7 @@ export function App() {
     setBusyId("hook-install");
     try {
       const response = await fetch("/api/codex-hook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" }
+        method: "POST"
       });
       if (!response.ok) {
         throw new Error(await readError(response));
@@ -586,8 +637,7 @@ export function App() {
     setBusyId("hook-remove");
     try {
       const response = await fetch("/api/codex-hook", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" }
+        method: "DELETE"
       });
       if (!response.ok) {
         throw new Error(await readError(response));
@@ -791,15 +841,35 @@ export function App() {
             <Box size={16} aria-hidden="true" />
             Skills
           </Button>
-          <Button className="nav-item disabled" variant="outline" size="sm" type="button" disabled>
+          <Button
+            className={configured && activeView === "sync" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={() => {
+              if (configured) {
+                setView("sync");
+              }
+            }}
+            disabled={!configured}
+          >
             <RefreshCw size={16} aria-hidden="true" />
             Sync
-            <span>Planned</span>
           </Button>
-          <Button className="nav-item disabled" variant="outline" size="sm" type="button" disabled>
+          <Button
+            className={configured && activeView === "usage" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={() => {
+              if (configured) {
+                setView("usage");
+              }
+            }}
+            disabled={!configured}
+          >
             <Clock3 size={16} aria-hidden="true" />
             Usage
-            <span>Planned</span>
           </Button>
           <Button
             className={configured && activeView === "archive" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
@@ -839,7 +909,7 @@ export function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Codex Skill Manager</p>
-            <h1>{activeView === "settings" ? "Settings" : activeView === "archive" ? "Archive" : "Skills"}</h1>
+            <h1>{viewTitle(activeView)}</h1>
           </div>
           <div className="topbar-actions">
             <Button variant="secondary" size="sm" type="button" onClick={() => void refresh()}>
@@ -851,7 +921,7 @@ export function App() {
               size="sm"
               type="button"
               onClick={() => void pullFromRemote()}
-              disabled={!configured || activeView !== "skills" || busyId !== null}
+              disabled={!configured || (activeView !== "skills" && activeView !== "sync") || busyId !== null}
             >
               {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
               Pull
@@ -975,6 +1045,48 @@ export function App() {
           />
         ) : null}
 
+        {configured && activeView === "sync" ? (
+          <SyncPanel
+            report={report}
+            branchStatus={status.gitBranchStatus}
+            autoSyncStatus={status.autoSync}
+            gitStatus={status.gitStatus}
+            cleanCount={cleanCount}
+            reviewCount={reviewCount}
+            localChangeCount={localChangeRows.length}
+            unmanagedCount={unmanagedRows.length}
+            conflictCount={conflictRows.length}
+            repoInstallCount={repoInstallRows.length}
+            repoUpdateCount={repoUpdateRows.length}
+            repoApplyCount={repoApplyCount}
+            busyId={busyId}
+            onPull={() => void pullFromRemote()}
+            onApplyRepoChanges={() => void applyRepoChangesToLocal()}
+            onShowSkills={(nextFilter) => {
+              setFilter(nextFilter);
+              setView("skills");
+            }}
+            onSettings={() => setView("settings")}
+          />
+        ) : null}
+
+        {configured && activeView === "usage" ? (
+          <UsagePanel
+            usageHook={status.usageHook}
+            rows={usageRows}
+            usedCount={usedRows.length}
+            neverUsedCount={neverUsedRows.length}
+            staleCount={staleUsageRows.length}
+            busyId={busyId}
+            onInstallHook={() => void installCodexHook()}
+            onRemoveHook={() => void removeCodexHook()}
+            onSelectRow={(row) => {
+              setSelectedRowKey(rowKey(row));
+              setDetailOpen(true);
+            }}
+          />
+        ) : null}
+
         {configured && activeView === "skills" ? (
           <Card className="skill-panel">
             <section className="repo-strip" aria-label="Repository status">
@@ -989,6 +1101,22 @@ export function App() {
                 </div>
                 <div className="path-stack-controls">
                   <BranchSyncBadge status={status.gitBranchStatus} />
+                  <Button
+                    className="path-stack-action"
+                    variant="secondary"
+                    size="sm"
+                    type="button"
+                    onClick={() => void applyRepoChangesToLocal()}
+                    disabled={!configured || activeView !== "skills" || busyId !== null || repoApplyCount === 0}
+                    title={
+                      repoApplyCount === 0
+                        ? "No repo changes to apply locally"
+                        : `Install ${repoInstallRows.length} missing and update ${repoUpdateRows.length} changed local copies`
+                    }
+                  >
+                    {busyId === "apply-repo" ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
+                    Apply repo changes{repoApplyCount > 0 ? ` (${repoApplyCount})` : ""}
+                  </Button>
                   <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => setView("settings")}>
                     <Settings size={14} aria-hidden="true" />
                     Change paths
@@ -1530,6 +1658,236 @@ function SettingsPanel({
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function SyncPanel({
+  report,
+  branchStatus,
+  autoSyncStatus,
+  gitStatus,
+  cleanCount,
+  reviewCount,
+  localChangeCount,
+  unmanagedCount,
+  conflictCount,
+  repoInstallCount,
+  repoUpdateCount,
+  repoApplyCount,
+  busyId,
+  onPull,
+  onApplyRepoChanges,
+  onShowSkills,
+  onSettings
+}: {
+  report: StatusReport | null;
+  branchStatus: GitBranchSyncStatus;
+  autoSyncStatus: AutoSyncStatus;
+  gitStatus: string;
+  cleanCount: number;
+  reviewCount: number;
+  localChangeCount: number;
+  unmanagedCount: number;
+  conflictCount: number;
+  repoInstallCount: number;
+  repoUpdateCount: number;
+  repoApplyCount: number;
+  busyId: string | null;
+  onPull: () => void;
+  onApplyRepoChanges: () => void;
+  onShowSkills: (filter: Filter) => void;
+  onSettings: () => void;
+}) {
+  return (
+    <Card className="skill-panel sync-panel">
+      <section className="repo-strip" aria-label="Sync status">
+        <StatusTile label="Tracked" value={String(report?.managed.length ?? 0)} />
+        <StatusTile label="In sync" value={String(cleanCount)} tone="good" />
+        <StatusTile label="Needs action" value={String(reviewCount)} tone={reviewCount > 0 ? "risk" : "neutral"} />
+        <div className="path-stack">
+          <div className="path-stack-lines">
+            <PathLine icon={<FolderGit2 size={14} aria-hidden="true" />} label="Sync repo" value={report?.syncRepo ?? ""} />
+            <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Codex skills" value={report?.codexSkillsDir ?? ""} />
+            <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Agents skills" value={report?.agentsSkillsDir ?? ""} />
+          </div>
+          <div className="path-stack-controls">
+            <BranchSyncBadge status={branchStatus} />
+            <AutoSyncIndicator status={autoSyncStatus} />
+          </div>
+        </div>
+      </section>
+
+      <section className="sync-actions" aria-label="Sync actions">
+        <Button variant="primary" type="button" onClick={onApplyRepoChanges} disabled={busyId !== null || repoApplyCount === 0}>
+          {busyId === "apply-repo" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Download size={15} aria-hidden="true" />}
+          Apply repo changes{repoApplyCount > 0 ? ` (${repoApplyCount})` : ""}
+        </Button>
+        <Button variant="secondary" type="button" onClick={onPull} disabled={busyId !== null}>
+          {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
+          Pull from remote
+        </Button>
+        <Button variant="secondary" type="button" onClick={onSettings} disabled={busyId !== null}>
+          <Settings size={15} aria-hidden="true" />
+          Paths
+        </Button>
+      </section>
+
+      <section className="sync-grid" aria-label="Sync work queues">
+        <SyncQueueCard
+          title="Repo to this machine"
+          count={repoApplyCount}
+          body={`${repoInstallCount} missing local, ${repoUpdateCount} repo changed.`}
+          action="Review repo changes"
+          disabled={repoApplyCount === 0}
+          onClick={() => onShowSkills(repoInstallCount > 0 ? "missing_local" : "repo_modified")}
+        />
+        <SyncQueueCard
+          title="This machine to repo"
+          count={localChangeCount + unmanagedCount}
+          body={`${localChangeCount} tracked local change, ${unmanagedCount} local-only skill.`}
+          action="Review local changes"
+          disabled={localChangeCount + unmanagedCount === 0}
+          onClick={() => onShowSkills(localChangeCount > 0 ? "local_modified" : "unmanaged")}
+        />
+        <SyncQueueCard
+          title="Conflicts"
+          count={conflictCount}
+          body="Both sides changed or duplicate local copies differ."
+          action="Review conflicts"
+          disabled={conflictCount === 0}
+          tone={conflictCount > 0 ? "risk" : "neutral"}
+          onClick={() => onShowSkills("conflict")}
+        />
+      </section>
+
+      <section className="sync-log" aria-label="Git working tree">
+        <div>
+          <p className="eyebrow">Git working tree</p>
+          <h2>{gitStatus.trim().length > 0 ? "Uncommitted changes" : "Clean"}</h2>
+        </div>
+        <pre>{gitStatus.trim().length > 0 ? gitStatus : "No uncommitted sync repository changes."}</pre>
+      </section>
+    </Card>
+  );
+}
+
+function SyncQueueCard({
+  title,
+  count,
+  body,
+  action,
+  disabled,
+  tone = "neutral",
+  onClick
+}: {
+  title: string;
+  count: number;
+  body: string;
+  action: string;
+  disabled: boolean;
+  tone?: "neutral" | "risk";
+  onClick: () => void;
+}) {
+  return (
+    <div className={`sync-queue ${tone}`}>
+      <div>
+        <span>{title}</span>
+        <strong>{count}</strong>
+      </div>
+      <p>{body}</p>
+      <Button variant="secondary" size="sm" type="button" disabled={disabled} onClick={onClick}>
+        {action}
+      </Button>
+    </div>
+  );
+}
+
+function UsagePanel({
+  usageHook,
+  rows,
+  usedCount,
+  neverUsedCount,
+  staleCount,
+  busyId,
+  onInstallHook,
+  onRemoveHook,
+  onSelectRow
+}: {
+  usageHook: UsageHookStatus;
+  rows: SkillRow[];
+  usedCount: number;
+  neverUsedCount: number;
+  staleCount: number;
+  busyId: string | null;
+  onInstallHook: () => void;
+  onRemoveHook: () => void;
+  onSelectRow: (row: SkillRow) => void;
+}) {
+  const installingHook = busyId === "hook-install";
+  const removingHook = busyId === "hook-remove";
+
+  return (
+    <Card className="skill-panel usage-panel">
+      <section className="repo-strip usage-strip" aria-label="Usage status">
+        <StatusTile label="Installed" value={String(rows.length)} />
+        <StatusTile label="Used" value={String(usedCount)} tone="good" />
+        <StatusTile label="Never used" value={String(neverUsedCount)} tone={neverUsedCount > 0 ? "risk" : "neutral"} />
+        <StatusTile label="30d idle" value={String(staleCount)} tone={staleCount > 0 ? "risk" : "neutral"} />
+      </section>
+
+      <section className="usage-hook-panel" aria-label="Usage hook">
+        <div className="hook-summary">
+          <Badge variant={usageHook.installed && !usageHook.needsUpdate ? "success" : "warning"}>
+            {usageHook.installed ? (usageHook.needsUpdate ? "Hook update available" : "Hook installed") : "Hook not installed"}
+          </Badge>
+          <p>
+            Last used is recorded from explicit skill mentions in Codex prompts. The hook stores only skill id, timestamp,
+            and source.
+          </p>
+          {usageHook.reason ? <p className="hook-warning">{usageHook.reason}</p> : null}
+        </div>
+        <div className="settings-actions">
+          <Button variant="primary" type="button" onClick={onInstallHook} disabled={installingHook || removingHook || !usageHook.installable}>
+            {installingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Clock3 size={15} aria-hidden="true" />}
+            {usageHook.installed ? (usageHook.needsUpdate ? "Update hook" : "Reinstall hook") : "Install hook"}
+          </Button>
+          <Button variant="secondary" type="button" onClick={onRemoveHook} disabled={installingHook || removingHook || !usageHook.installed}>
+            {removingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+            Remove
+          </Button>
+        </div>
+      </section>
+
+      <section className="skill-list" aria-label="Usage by skill">
+        <div className="skill-table-scroll">
+          <div className="table-head usage-table-head" role="row">
+            <span>Name</span>
+            <span>Source</span>
+            <span>Last used</span>
+            <span>Local modified</span>
+          </div>
+          {rows.length === 0 ? (
+            <div className="empty-state">
+              <h2>No installed skills</h2>
+              <p>Install or add skills to begin collecting usage timestamps.</p>
+            </div>
+          ) : null}
+          {rows.map((row) => (
+            <button className="usage-row" type="button" key={`usage:${rowKey(row)}`} onClick={() => onSelectRow(row)}>
+              <span className="skill-main">
+                <strong>{row.name || row.id}</strong>
+                <small>{row.id}</small>
+              </span>
+              <Badge variant="outline" className={`source-badge ${row.source}`}>
+                {sourceLabel(row.source)}
+              </Badge>
+              <span>{formatLastUsed(row.lastUsedAt)}</span>
+              <span>{formatLocalModified(row.localModifiedAt)}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    </Card>
   );
 }
 
@@ -2512,6 +2870,47 @@ function SkeletonRows() {
 function filterLabel(filter: Filter) {
   if (filter === "all") return "All";
   return syncLabel(filter);
+}
+
+function viewTitle(view: View) {
+  const titles: Record<View, string> = {
+    skills: "Skills",
+    sync: "Sync",
+    usage: "Usage",
+    archive: "Archive",
+    settings: "Settings"
+  };
+
+  return titles[view];
+}
+
+function compareUsageRows(a: SkillRow, b: SkillRow) {
+  if (a.lastUsedAt && b.lastUsedAt) {
+    return new Date(b.lastUsedAt).getTime() - new Date(a.lastUsedAt).getTime();
+  }
+
+  if (a.lastUsedAt) {
+    return -1;
+  }
+
+  if (b.lastUsedAt) {
+    return 1;
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
+function isStaleUsageRow(row: SkillRow) {
+  if (!row.lastUsedAt) {
+    return false;
+  }
+
+  const usedAt = new Date(row.lastUsedAt);
+  if (Number.isNaN(usedAt.getTime())) {
+    return false;
+  }
+
+  return Date.now() - usedAt.getTime() >= 30 * 24 * 60 * 60 * 1000;
 }
 
 function syncLabel(state: SkillRow["syncState"] | Filter) {
