@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import type { LocalConfig, LocalSkillSource, SkillRecord } from "./types.js";
+import { ensureSkillDependenciesInstalled } from "./skillDependencies.js";
+import type { DependencyInstallResult, InstallRepoSkillResult, LocalConfig, LocalSkillSource, SkillRecord } from "./types.js";
 import { copySkillDirectory } from "./copy.js";
 import { hashDirectory } from "./hash.js";
 import { readSkillsMetadata, upsertSkillRecord } from "./metadata.js";
@@ -13,7 +14,7 @@ export type InstallOptions = {
   source?: LocalSkillSource;
 };
 
-export async function installRepoSkill(config: LocalConfig, skillId: string, options: InstallOptions = {}): Promise<SkillRecord> {
+export async function installRepoSkill(config: LocalConfig, skillId: string, options: InstallOptions = {}): Promise<InstallRepoSkillResult> {
   const id = validateSkillId(skillId);
   const metadata = await readSkillsMetadata(config.syncRepo);
   const existing = metadata.skills.find((skill) => skill.id === id && skill.status === "managed");
@@ -56,10 +57,23 @@ export async function installRepoSkill(config: LocalConfig, skillId: string, opt
     updatedAt: now
   };
 
+  const dependencyInstall = await installDependencies(targetPath, record.id);
   await upsertSkillRecord(config.syncRepo, record);
-  return record;
+  return { record, dependencyInstall };
 }
 
 function localRootForSource(config: LocalConfig, source: LocalSkillSource): string {
   return source === "agents" ? config.agentsSkillsDir : config.codexSkillsDir;
+}
+
+async function installDependencies(
+  skillPath: string,
+  skillId: string
+): Promise<DependencyInstallResult> {
+  try {
+    return await ensureSkillDependenciesInstalled(skillPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to install dependencies for ${skillId}: ${message}`);
+  }
 }

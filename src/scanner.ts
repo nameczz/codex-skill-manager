@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { ScanSource, ScannedSkill } from "./types.js";
 import { readSkillFrontmatter } from "./frontmatter.js";
@@ -36,11 +36,32 @@ export async function scanSkills(root: string, source: ScanSource, options: Scan
       description: frontmatter.description,
       path: current,
       source,
-      hash: await hashDirectory(current)
+      hash: await hashDirectory(current),
+      modifiedAt: new Date(await latestModifiedTime(current)).toISOString()
     });
   }
 
   return skills.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function latestModifiedTime(current: string): Promise<number> {
+  const stat = await lstat(current);
+  if (!stat.isDirectory()) {
+    return stat.mtimeMs;
+  }
+
+  let latest = stat.mtimeMs;
+  const entries = await readdir(current, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") {
+      continue;
+    }
+
+    const childModified = await latestModifiedTime(path.join(current, entry.name));
+    latest = Math.max(latest, childModified);
+  }
+
+  return latest;
 }
 
 function shouldSkipDirectory(name: string, options: ScanOptions): boolean {

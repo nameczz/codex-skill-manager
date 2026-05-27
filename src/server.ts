@@ -9,16 +9,26 @@ import { tryLoadLocalConfig } from "./config.js";
 import { initialize } from "./init.js";
 import { buildStatusReport } from "./status.js";
 import { selectDirectory, type DirectoryPicker } from "./directoryPicker.js";
-import { gitPull, gitStatus } from "./git.js";
+import { gitBranchSyncStatus, gitPull, gitStatus } from "./git.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
-import { syncSelectedSkills, type SyncSelection } from "./sync.js";
+import { syncRepositoryChanges, syncSelectedSkills, type SyncSelection } from "./sync.js";
 import { archiveSkill } from "./archiveSkill.js";
 import { removeLocalSkill } from "./removeLocalSkill.js";
 import { recordUsageEvent } from "./usage.js";
 import { updateLocalSkill } from "./updateLocalSkill.js";
+import { restoreArchivedSkill } from "./restoreArchivedSkill.js";
+import { resolveConflict } from "./resolveConflict.js";
 import { getUsageHookStatus, installUsageHook, removeUsageHook } from "./codexHook.js";
-import { getDefaultAgentsSkillsDir, getDefaultCacheDir, getDefaultCodexSkillsDir, resolveSkillPath } from "./paths.js";
+import { createAutoSyncController } from "./autoSync.js";
+import {
+  getDefaultAgentsSkillsDir,
+  getDefaultCacheDir,
+  getDefaultCodexSkillsDir,
+  resolveSkillPath,
+  repoSkillsDir,
+  validateSkillId
+} from "./paths.js";
 
 export type ServerOptions = {
   host?: string;
@@ -54,10 +64,41 @@ type SyncBody = {
   }>;
 };
 
+type SkillVersionsBody = {
+  skillId?: string;
+};
+
+type ResolveConflictBody = {
+  skillId?: string;
+  strategy?: "codex" | "agents" | "repo";
+};
+
+type SkillVersionSource = "codex" | "agents" | "repo";
+
+type SkillVersionPayload = {
+  source: SkillVersionSource;
+  path: string;
+  exists: boolean;
+  content: string | null;
+};
+
+type SkillVersionsPayload = {
+  versions: SkillVersionPayload[];
+};
+
+type BulkActionBody = SyncBody & {
+  endpoint?: string;
+};
+
 export async function startServer(options: ServerOptions = {}): Promise<{ url: string; close: () => Promise<void> }> {
   let config: LocalConfig | null = await tryLoadLocalConfig();
   const directoryPicker = options.directoryPicker ?? selectDirectory;
   const app = fastify({ logger: false });
+  const autoSync = createAutoSyncController();
+
+  if (config) {
+    await autoSync.start(config);
+  }
 
   app.setErrorHandler((error, _request, reply) => {
     const normalized = normalizeError(error);
@@ -87,7 +128,9 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
       config,
       usageHook: await getUsageHookStatus(config),
       gitStatus: await gitStatus(config.syncRepo),
-      report
+      gitBranchStatus: await gitBranchSyncStatus(config.syncRepo),
+      report,
+      autoSync: autoSync.getStatus()
     };
   });
 
@@ -105,11 +148,13 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
       cacheDir: optionalPath(request.body?.cacheDir)
     });
     config = result.config;
+    await autoSync.start(config);
     return {
       configured: true,
       gitInitialized: result.gitInitialized,
       config: result.config,
-      usageHook: await getUsageHookStatus(result.config)
+      usageHook: await getUsageHookStatus(result.config),
+      autoSync: autoSync.getStatus()
     };
   });
 
@@ -123,13 +168,16 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
       force: true
     });
     config = result.config;
+    await autoSync.start(config);
     return {
       configured: true,
       gitInitialized: result.gitInitialized,
       config: result.config,
       usageHook: await getUsageHookStatus(result.config),
       gitStatus: await gitStatus(result.config.syncRepo),
-      report: await buildStatusReport(result.config)
+      gitBranchStatus: await gitBranchSyncStatus(result.config.syncRepo),
+      report: await buildStatusReport(result.config),
+      autoSync: autoSync.getStatus()
     };
   });
 
@@ -140,25 +188,29 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
   app.post<{ Body: SkillActionBody }>("/api/import", async (request, reply) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
-    const record = await importLocalSkill(loaded, skillId, { force: request.body.force, source: optionalLocalSource(request.body.source) });
+    const source = optionalLocalSource(request.body.source);
+    const record = await importLocalSkill(loaded, skillId, { force: request.body.force, source });
+    const result = await syncSelectedSkills(loaded, [{ skillId, source }]);
     reply.code(201);
-    return { record };
+    return { record, result };
   });
 
   app.post<{ Body: SkillActionBody }>("/api/install", async (request) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
     const source = optionalLocalSource(request.body.source);
-    const record = await installRepoSkill(loaded, skillId, { force: request.body.force, source });
-    return { record };
+    const { record, dependencyInstall } = await installRepoSkill(loaded, skillId, { force: request.body.force, source });
+    const result = await syncRepositoryChanges(loaded);
+    return { record, result, dependencyInstall };
   });
 
   app.post<{ Body: SkillActionBody }>("/api/update-local", async (request) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
     const source = optionalLocalSource(request.body.source);
-    const record = await updateLocalSkill(loaded, skillId, { source });
-    return { record };
+    const { record, dependencyInstall } = await updateLocalSkill(loaded, skillId, { source });
+    const result = await syncRepositoryChanges(loaded);
+    return { record, result, dependencyInstall };
   });
 
   app.post<{ Body: SkillActionBody }>("/api/remove-local", async (request) => {
@@ -166,14 +218,39 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     const skillId = requireSkillId(request.body);
     const source = optionalLocalSource(request.body.source);
     const record = await removeLocalSkill(loaded, skillId, { source });
-    return { record };
+    const result = await syncRepositoryChanges(loaded);
+    return { record, result };
+  });
+
+  app.post<{ Body: ResolveConflictBody }>("/api/resolve-conflict", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const strategy = requireResolveStrategy(request.body?.strategy);
+    const payload = await resolveConflict(loaded, skillId, { strategy });
+    return payload;
+  });
+
+  app.post<{ Body: SkillVersionsBody }>("/api/skill-versions", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const versions = await buildSkillVersions(loaded, skillId);
+    return { versions };
   });
 
   app.post<{ Body: SkillActionBody }>("/api/archive", async (request) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
     const record = await archiveSkill(loaded, skillId);
-    return { record };
+    const result = await syncRepositoryChanges(loaded);
+    return { record, result };
+  });
+
+  app.post<{ Body: SkillActionBody }>("/api/restore", async (request) => {
+    const loaded = requireConfig(config);
+    const skillId = requireSkillId(request.body);
+    const record = await restoreArchivedSkill(loaded, skillId);
+    const result = await syncRepositoryChanges(loaded);
+    return { record, result };
   });
 
   app.post<{ Body: { skillId?: string; invokedAt?: string } }>("/api/record", async (request) => {
@@ -186,7 +263,11 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
   app.post("/api/pull", async () => {
     const loaded = requireConfig(config);
     await gitPull(loaded.syncRepo);
-    return { pulled: true, gitStatus: await gitStatus(loaded.syncRepo) };
+    return {
+      pulled: true,
+      gitStatus: await gitStatus(loaded.syncRepo),
+      gitBranchStatus: await gitBranchSyncStatus(loaded.syncRepo)
+    };
   });
 
   app.get("/api/codex-hook", async () => {
@@ -225,6 +306,7 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     }
 
     await writeFile(filePath, requireSkillFileContent(request.body), "utf8");
+    autoSync.trigger();
     return { path: filePath };
   });
 
@@ -232,6 +314,31 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     const loaded = requireConfig(config);
     const result = await syncSelectedSkills(loaded, requireSyncSelections(request.body));
     return { result };
+  });
+
+  app.post<{ Body: BulkActionBody }>("/api/bulk-action", async (request) => {
+    const loaded = requireConfig(config);
+    const endpoint = requireBulkActionEndpoint(request.body?.endpoint);
+    const selections = requireSyncSelections(request.body);
+    const records = [];
+    const dependencyInstalls = [];
+
+    for (const selection of selections) {
+      if (endpoint === "import") {
+        records.push(await importLocalSkill(loaded, selection.skillId, { force: true, source: selection.source }));
+      } else if (endpoint === "install") {
+        const installed = await installRepoSkill(loaded, selection.skillId, { force: true, source: selection.source });
+        records.push(installed.record);
+        dependencyInstalls.push({ skillId: selection.skillId, ...installed.dependencyInstall });
+      } else {
+        const installed = await updateLocalSkill(loaded, selection.skillId, { source: selection.source });
+        records.push(installed.record);
+        dependencyInstalls.push({ skillId: selection.skillId, ...installed.dependencyInstall });
+      }
+    }
+
+    const result = endpoint === "import" ? await syncSelectedSkills(loaded, selections) : await syncRepositoryChanges(loaded);
+    return { records, dependencyInstalls, result };
   });
 
   const webRoot = findWebRoot();
@@ -264,7 +371,10 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
 
   return {
     url: address,
-    close: () => app.close()
+    close: async () => {
+      await autoSync.stop();
+      await app.close();
+    }
   };
 }
 
@@ -303,6 +413,14 @@ function requireSyncSelections(body: SyncBody | undefined): SyncSelection[] {
   }));
 }
 
+function requireBulkActionEndpoint(value: unknown): "import" | "install" | "update-local" {
+  if (value === "import" || value === "install" || value === "update-local") {
+    return value;
+  }
+
+  throw httpError(400, "Bulk action endpoint must be import, install, or update-local.");
+}
+
 function optionalPath(value: unknown): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
@@ -335,6 +453,47 @@ function optionalDate(value: unknown): string | undefined {
   }
 
   return trimmed;
+}
+
+function requireResolveStrategy(value: unknown): "codex" | "agents" | "repo" {
+  if (value === "codex" || value === "agents" || value === "repo") {
+    return value;
+  }
+
+  throw httpError(400, "Conflict strategy must be codex, agents, or repo.");
+}
+
+async function buildSkillVersions(config: LocalConfig, skillId: string): Promise<SkillVersionPayload[]> {
+  const id = validateSkillId(skillId);
+  const sources: Array<{ source: SkillVersionSource; path: string }> = [
+    { source: "codex", path: resolveSkillPath(config.codexSkillsDir, id) },
+    { source: "agents", path: resolveSkillPath(config.agentsSkillsDir, id) },
+    { source: "repo", path: resolveSkillPath(repoSkillsDir(config.syncRepo), id) }
+  ];
+
+  const versions = await Promise.all(
+    sources.map(async (entry) => {
+      const skillFilePath = path.join(entry.path, "SKILL.md");
+      if (!existsSync(skillFilePath)) {
+        return {
+          source: entry.source,
+          path: skillFilePath,
+          exists: false,
+          content: null
+        };
+      }
+
+      const content = await readFile(skillFilePath, "utf8");
+      return {
+        source: entry.source,
+        path: skillFilePath,
+        exists: true,
+        content
+      };
+    })
+  );
+
+  return versions;
 }
 
 function optionalTitle(value: unknown): string | undefined {

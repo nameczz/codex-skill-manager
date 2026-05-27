@@ -51,8 +51,10 @@ describe("installRepoSkill", () => {
     const installed = await installRepoSkill(config, "foo");
     const metadata = await readSkillsMetadata(syncRepo);
 
-    expect(installed.installed).toBe(true);
-    expect(installed.syncState).toBe("clean");
+    expect(installed.record.installed).toBe(true);
+    expect(installed.record.syncState).toBe("clean");
+    expect(installed.dependencyInstall.status).toBe("skipped-no-package-json");
+    expect(installed.dependencyInstall.packageManager).toBeNull();
     expect(existsSync(path.join(codexSkillsDir, "foo", "SKILL.md"))).toBe(true);
     expect(metadata.skills[0]?.installed).toBe(true);
 
@@ -100,7 +102,9 @@ describe("installRepoSkill", () => {
 
     const installed = await installRepoSkill(config, "klay-writer");
 
-    expect(installed.localSource).toBe("agents");
+    expect(installed.record.localSource).toBe("agents");
+    expect(installed.dependencyInstall.status).toBe("skipped-no-package-json");
+    expect(installed.dependencyInstall.packageManager).toBeNull();
     expect(existsSync(path.join(agentsSkillsDir, "klay-writer", "SKILL.md"))).toBe(true);
     expect(existsSync(path.join(codexSkillsDir, "klay-writer", "SKILL.md"))).toBe(false);
 

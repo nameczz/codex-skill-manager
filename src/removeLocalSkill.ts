@@ -83,7 +83,7 @@ function resolveRemoveSource(config: LocalConfig, id: string, record: SkillRecor
   const existsInAgents = existsSync(agentsPath);
 
   if (existsInCodex && existsInAgents) {
-    throw new Error(`Skill ${id} exists in both local roots; specify --source codex or agents.`);
+    return ["codex", "agents"];
   }
 
   if (existsInCodex) {

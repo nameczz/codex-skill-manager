@@ -6,7 +6,7 @@ import { buildStatusReport } from "./status.js";
 import { formatStatus } from "./format.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
-import { gitPull, gitStatus } from "./git.js";
+import { gitBranchSyncStatus, gitPull, gitStatus } from "./git.js";
 import { startServer } from "./server.js";
 import { syncSelectedSkills } from "./sync.js";
 import { recordUsageEvent } from "./usage.js";
@@ -60,8 +60,11 @@ program
 
     console.log(formatStatus(report));
     const status = await gitStatus(config.syncRepo);
+    const branchStatus = await gitBranchSyncStatus(config.syncRepo);
+    const branchSummaryText = formatBranchSummary(branchStatus);
     console.log("");
     console.log(`Git status: ${status || "clean"}`);
+    console.log(`Git branch: ${branchSummaryText}`);
   });
 
 program
@@ -189,7 +192,7 @@ program
   .action(async (skillId, options) => {
     const config = await loadLocalConfig();
     const source = resolveSourceOption(options.source);
-    const record = await installRepoSkill(config, skillId, { force: options.force, source });
+    const { record } = await installRepoSkill(config, skillId, { force: options.force, source });
     console.log(`Installed ${record.id}`);
   });
 
@@ -258,6 +261,30 @@ function parseHookInput(raw: string): unknown {
   } catch {
     return {};
   }
+}
+
+function formatBranchSummary(status: { state: string; ahead: number; behind: number; upstream: string | null }): string {
+  if (status.state === "up-to-date") {
+    return "up to date";
+  }
+
+  if (status.state === "ahead") {
+    return `${status.ahead} commit(s) ahead of ${status.upstream ?? "remote"}`;
+  }
+
+  if (status.state === "behind") {
+    return `${status.behind} commit(s) behind ${status.upstream ?? "remote"}`;
+  }
+
+  if (status.state === "diverged") {
+    return `diverged: +${status.ahead}/-${status.behind} from ${status.upstream ?? "remote"}`;
+  }
+
+  if (status.state === "no-upstream") {
+    return "no remote tracking branch";
+  }
+
+  return "unknown";
 }
 
 program.exitOverride();

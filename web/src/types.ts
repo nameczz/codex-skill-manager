@@ -6,6 +6,8 @@ export type SyncState =
   | "missing_local"
   | "missing_repo";
 
+export type ArchiveCopyStatus = "present" | "missing";
+
 export type LocalSkillSource = "codex" | "agents";
 export type ScanSource = LocalSkillSource | "repo" | "archive";
 
@@ -15,6 +17,9 @@ export type SkillRecord = {
   description: string;
   status: "managed" | "archived";
   localSource?: LocalSkillSource | null;
+  localSources?: LocalSkillSource[];
+  localCopiesDiffer?: boolean;
+  localModifiedAt?: string | null;
   installed: boolean;
   syncState: SyncState;
   lastSyncedHash: string | null;
@@ -24,6 +29,9 @@ export type SkillRecord = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  archivePath?: string;
+  archiveCopyStatus?: ArchiveCopyStatus;
+  archiveHash?: string | null;
 };
 
 export type ScannedSkill = {
@@ -33,6 +41,7 @@ export type ScannedSkill = {
   path: string;
   source: ScanSource;
   hash: string;
+  modifiedAt: string;
 };
 
 export type StatusReport = {
@@ -42,6 +51,7 @@ export type StatusReport = {
   managed: SkillRecord[];
   unmanagedLocal: ScannedSkill[];
   repoOnly: ScannedSkill[];
+  archived: SkillRecord[];
 };
 
 export type UsageHookStatus = {
@@ -52,6 +62,40 @@ export type UsageHookStatus = {
   reason: string | null;
   command: string;
   installedCommand: string | null;
+};
+
+export type AutoSyncStatus = {
+  enabled: boolean;
+  mode: "disabled" | "watching" | "polling";
+  running: boolean;
+  pending: boolean;
+  lastRunStartedAt: string | null;
+  lastRunCompletedAt: string | null;
+  lastSyncedSkillIds: string[];
+  lastError: string | null;
+  watchersSupported: boolean;
+};
+
+export type SkillVersionSource = LocalSkillSource | "repo";
+
+export type SkillVersion = {
+  source: SkillVersionSource;
+  path: string;
+  exists: boolean;
+  content: string | null;
+};
+
+export type SkillVersionsResponse = {
+  versions: SkillVersion[];
+};
+
+export type GitBranchSyncState = "up-to-date" | "ahead" | "behind" | "diverged" | "no-upstream" | "unknown";
+
+export type GitBranchSyncStatus = {
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  state: GitBranchSyncState;
 };
 
 export type ApiStatus =
@@ -74,7 +118,9 @@ export type ApiStatus =
       };
       usageHook: UsageHookStatus;
       gitStatus: string;
+      gitBranchStatus: GitBranchSyncStatus;
       report: StatusReport;
+      autoSync: AutoSyncStatus;
     };
 
 export type SyncResult = {
@@ -87,6 +133,20 @@ export type SyncResult = {
   gitStatus: string;
 };
 
+export type DependencyInstallInfo = {
+  status: "installed" | "skipped-no-package-json" | "skipped-existing-node-modules" | "failed";
+  packageManager: "npm" | "yarn" | "pnpm" | "bun" | null;
+  command: string;
+  message: string;
+};
+
+export type ResolveConflictResult = {
+  record: SkillRecord;
+  result?: SyncResult;
+};
+
+export type SkillRowSource = LocalSkillSource | "both" | "repo";
+
 export type SkillRow =
   | {
       kind: "managed";
@@ -96,13 +156,15 @@ export type SkillRow =
       syncState: SyncState;
       installed: boolean;
       status: "managed" | "archived";
-      source: LocalSkillSource | "repo";
+      source: SkillRowSource;
+      localSources: LocalSkillSource[];
+      localCopiesDiffer: boolean;
       repoHash: string | null;
       localHash: string | null;
       localPath: string;
       repoPath: string;
       lastUsedAt: string | null;
-      updatedAt: string;
+      localModifiedAt: string | null;
     }
   | {
       kind: "unmanaged";
@@ -110,14 +172,16 @@ export type SkillRow =
       name: string;
       description: string;
       syncState: "unmanaged";
-      source: LocalSkillSource;
+      source: SkillRowSource;
+      localSources: LocalSkillSource[];
+      localCopiesDiffer: boolean;
       installed: true;
       repoHash: null;
       localHash: string;
       localPath: string;
       repoPath: null;
       lastUsedAt: null;
-      updatedAt: null;
+      localModifiedAt: string | null;
     }
   | {
       kind: "repo-only";
@@ -126,11 +190,13 @@ export type SkillRow =
       description: string;
       syncState: "repo_only";
       source: "repo";
+      localSources: [];
+      localCopiesDiffer: false;
       installed: false;
       repoHash: string;
       localHash: null;
       localPath: null;
       repoPath: string;
       lastUsedAt: null;
-      updatedAt: null;
+      localModifiedAt: null;
     };

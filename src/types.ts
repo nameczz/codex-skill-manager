@@ -8,6 +8,8 @@ export type SyncState =
   | "missing_local"
   | "missing_repo";
 
+export type ArchiveCopyStatus = "present" | "missing";
+
 export type LocalSkillSource = "codex" | "agents";
 export type ScanSource = LocalSkillSource | "repo" | "archive";
 
@@ -33,6 +35,9 @@ export type SkillRecord = {
   description: string;
   status: SkillStatus;
   localSource?: LocalSkillSource | null;
+  localSources?: LocalSkillSource[];
+  localCopiesDiffer?: boolean;
+  localModifiedAt?: string | null;
   installed: boolean;
   syncState: SyncState;
   lastSyncedHash: string | null;
@@ -42,6 +47,9 @@ export type SkillRecord = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  archivePath?: string;
+  archiveCopyStatus?: ArchiveCopyStatus;
+  archiveHash?: string | null;
 };
 
 export type SkillsMetadata = {
@@ -53,6 +61,22 @@ export type UsageEvent = {
   skillId: string;
   invokedAt: string;
   source: "record";
+};
+
+export type DependencyInstallStatus = "skipped-no-package-json" | "skipped-existing-node-modules" | "installed" | "failed";
+
+export type PackageManager = "npm" | "yarn" | "pnpm" | "bun";
+
+export type DependencyInstallResult = {
+  status: DependencyInstallStatus;
+  packageManager: PackageManager | null;
+  command: string;
+  message: string;
+};
+
+export type InstallRepoSkillResult = {
+  record: SkillRecord;
+  dependencyInstall: DependencyInstallResult;
 };
 
 export type UsageHookStatus = {
@@ -72,6 +96,7 @@ export type ScannedSkill = {
   path: string;
   source: ScanSource;
   hash: string;
+  modifiedAt: string;
 };
 
 export type StatusReport = {
@@ -81,4 +106,5 @@ export type StatusReport = {
   managed: SkillRecord[];
   unmanagedLocal: ScannedSkill[];
   repoOnly: ScannedSkill[];
+  archived: SkillRecord[];
 };

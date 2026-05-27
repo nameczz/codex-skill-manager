@@ -27,9 +27,58 @@ type PreparedSkill = {
   updateRepoFromLocal: boolean;
 };
 
+let syncGate: Promise<void> = Promise.resolve();
+
+async function withSyncLock<T>(task: () => Promise<T>): Promise<T> {
+  const next = syncGate.then(() => task());
+  syncGate = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
 export async function syncSelectedSkills(config: LocalConfig, selections: SyncSelection[]): Promise<SyncResult> {
+  return withSyncLock(() => syncSelectedSkillsNow(config, selections));
+}
+
+export async function syncSingleSkill(config: LocalConfig, skillId: string): Promise<SyncResult> {
+  return withSyncLock(() => syncSingleSkillNow(config, skillId));
+}
+
+async function syncSingleSkillNow(config: LocalConfig, skillId: string): Promise<SyncResult> {
+  const id = validateSkillId(skillId);
+  await requireGitRemote(config.syncRepo);
+
+  await gitAdd(config.syncRepo, stagePaths(config.syncRepo, [id]));
+  const committed = await gitHasStagedChanges(config.syncRepo);
+  const commitHash = committed ? await gitCommit(config.syncRepo, buildSyncSkillCommitMessage(id)) : null;
+
+  await gitPush(config.syncRepo);
+
+  return {
+    skillIds: [id],
+    updatedRepoSkillIds: [id],
+    committed,
+    pushed: true,
+    commitHash,
+    commitMessage: buildSyncSkillCommitMessage(id),
+    gitStatus: await gitStatus(config.syncRepo)
+  };
+}
+
+function buildSyncSkillCommitMessage(skillId: string): string {
+  return [
+    `Sync skill: ${skillId}`,
+    "",
+    "Synced selected skill content and repository metadata.",
+    `- ${skillId}`
+  ].join("\n");
+}
+
+async function syncSelectedSkillsNow(config: LocalConfig, selections: SyncSelection[]): Promise<SyncResult> {
   if (selections.length === 0) {
-    return syncRepositoryChanges(config);
+    return syncRepositoryChangesNow(config);
   }
 
   const prepared = await prepareSelections(config, selections);
@@ -67,6 +116,10 @@ export async function syncSelectedSkills(config: LocalConfig, selections: SyncSe
 }
 
 export async function syncRepositoryChanges(config: LocalConfig): Promise<SyncResult> {
+  return withSyncLock(() => syncRepositoryChangesNow(config));
+}
+
+async function syncRepositoryChangesNow(config: LocalConfig): Promise<SyncResult> {
   await requireGitRemote(config.syncRepo);
 
   const statusBeforeStage = await gitStatus(config.syncRepo);

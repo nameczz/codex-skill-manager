@@ -63,9 +63,11 @@ describe("status", () => {
 
     expect(report.managed).toHaveLength(1);
     expect(report.managed[0]?.syncState).toBe("clean");
+    expect(report.managed[0]?.localModifiedAt).toEqual(expect.any(String));
     expect(report.agentsSkillsDir).toBe(agentsSkillsDir);
     expect(report.unmanagedLocal.map((skill) => skill.id)).toEqual(["klay-writer", "local-only"]);
     expect(report.unmanagedLocal.find((skill) => skill.id === "klay-writer")?.source).toBe("agents");
+    expect(report.unmanagedLocal.find((skill) => skill.id === "klay-writer")?.modifiedAt).toEqual(expect.any(String));
   });
 
   it("injects last used time from usage events into managed report rows", async () => {
@@ -169,6 +171,156 @@ describe("status", () => {
 
     expect(report.managed[0]?.installed).toBe(true);
     expect(report.managed[0]?.localSource).toBe("agents");
+  });
+
+  it("reports every installed local source for a managed skill", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-status-sources-"));
+    const syncRepo = path.join(root, "repo");
+    const codexSkillsDir = path.join(root, "codex-skills");
+    const agentsSkillsDir = path.join(root, "agents-skills");
+    await ensureRepoMetadata(syncRepo);
+
+    await writeSkill(path.join(codexSkillsDir, "managed"), "managed");
+    await writeSkill(path.join(agentsSkillsDir, "managed"), "managed");
+    await writeSkill(path.join(syncRepo, "skills", "managed"), "managed");
+
+    const hash = await hashDirectory(path.join(syncRepo, "skills", "managed"));
+    const now = new Date().toISOString();
+    const record: SkillRecord = {
+      id: "managed",
+      name: "managed",
+      description: "",
+      status: "managed",
+      localSource: "codex",
+      installed: true,
+      syncState: "clean",
+      lastSyncedHash: hash,
+      currentRepoHash: hash,
+      currentLocalHash: hash,
+      lastUsedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null
+    };
+
+    await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
+
+    const report = await buildStatusReport({
+      schemaVersion: 1,
+      syncRepo,
+      codexSkillsDir,
+      agentsSkillsDir,
+      cacheDir: path.join(root, "cache"),
+      createdAt: now,
+      updatedAt: now
+    });
+
+    expect(report.managed[0]?.localSource).toBe("codex");
+    expect(report.managed[0]?.localSources).toEqual(["agents", "codex"]);
+    expect(report.managed[0]?.localCopiesDiffer).toBe(false);
+  });
+
+  it("includes archived records from metadata and enriches them from archive copy frontmatter", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-status-archived-"));
+    const syncRepo = path.join(root, "repo");
+    const codexSkillsDir = path.join(root, "codex-skills");
+    const agentsSkillsDir = path.join(root, "agents-skills");
+    await ensureRepoMetadata(syncRepo);
+
+    await writeSkill(path.join(syncRepo, "archive", "writer"), "Writer Archive");
+    await mkdir(path.join(syncRepo, "archive", "ghost"), { recursive: true });
+
+    const now = new Date().toISOString();
+    const archived: SkillRecord = {
+      id: "writer",
+      name: "Old writer",
+      description: "Legacy entry",
+      status: "archived",
+      installed: false,
+      syncState: "clean",
+      lastSyncedHash: null,
+      currentRepoHash: null,
+      currentLocalHash: null,
+      lastUsedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: now
+    };
+
+    await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [archived] });
+
+    const config: LocalConfig = {
+      schemaVersion: 1,
+      syncRepo,
+      codexSkillsDir,
+      agentsSkillsDir,
+      cacheDir: path.join(root, "cache"),
+      createdAt: now,
+      updatedAt: now
+    };
+
+    const report = await buildStatusReport(config);
+
+    expect(report.archived).toHaveLength(1);
+    expect(report.archived[0]?.id).toBe("writer");
+    expect(report.archived[0]?.name).toBe("Writer Archive");
+    expect(report.archived[0]?.description).toBe("Test skill");
+    expect(report.archived[0]?.archiveCopyStatus).toBe("present");
+    expect(report.archived[0]?.archivePath).toBe(path.join(syncRepo, "archive", "writer"));
+    expect(report.archived[0]?.currentRepoHash).toEqual(expect.any(String));
+    expect(report.archived[0]?.archiveHash).toEqual(expect.any(String));
+    expect(report.repoOnly).toHaveLength(0);
+    expect(report.managed).toHaveLength(0);
+  });
+
+  it("reports conflict when installed local source copies differ", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-status-source-conflict-"));
+    const syncRepo = path.join(root, "repo");
+    const codexSkillsDir = path.join(root, "codex-skills");
+    const agentsSkillsDir = path.join(root, "agents-skills");
+    await ensureRepoMetadata(syncRepo);
+
+    await writeSkill(path.join(codexSkillsDir, "managed"), "managed codex");
+    await writeSkill(path.join(agentsSkillsDir, "managed"), "managed");
+    await writeSkill(path.join(syncRepo, "skills", "managed"), "managed");
+
+    const hash = await hashDirectory(path.join(syncRepo, "skills", "managed"));
+    const now = new Date().toISOString();
+    const record: SkillRecord = {
+      id: "managed",
+      name: "managed",
+      description: "",
+      status: "managed",
+      localSource: "agents",
+      installed: true,
+      syncState: "clean",
+      lastSyncedHash: hash,
+      currentRepoHash: hash,
+      currentLocalHash: hash,
+      lastUsedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null
+    };
+
+    await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
+
+    const report = await buildStatusReport({
+      schemaVersion: 1,
+      syncRepo,
+      codexSkillsDir,
+      agentsSkillsDir,
+      cacheDir: path.join(root, "cache"),
+      createdAt: now,
+      updatedAt: now
+    });
+
+    expect(report.managed[0]?.installed).toBe(true);
+    expect(report.managed[0]?.localSource).toBe("agents");
+    expect(report.managed[0]?.localSources).toEqual(["agents", "codex"]);
+    expect(report.managed[0]?.localCopiesDiffer).toBe(true);
+    expect(report.managed[0]?.currentRepoHash).toBe(hash);
+    expect(report.managed[0]?.syncState).toBe("conflict");
   });
 });
 

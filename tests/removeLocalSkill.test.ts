@@ -58,6 +58,55 @@ describe("removeLocalSkill", () => {
     expect(updated.localSource).toBe("agents");
     expect(updated.currentLocalHash).toBe(await hashDirectory(path.join(agentsSkillsDir, "managed")));
   });
+
+  it("removes every local copy by default when duplicate local roots exist", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-remove-local-all-"));
+    const syncRepo = path.join(root, "repo");
+    const codexSkillsDir = path.join(root, "codex-skills");
+    const agentsSkillsDir = path.join(root, "agents-skills");
+    const now = new Date().toISOString();
+    const config: LocalConfig = {
+      schemaVersion: 1,
+      syncRepo,
+      codexSkillsDir,
+      agentsSkillsDir,
+      cacheDir: path.join(root, "cache"),
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await ensureRepoMetadata(syncRepo);
+    await writeSkill(path.join(syncRepo, "skills", "managed"), "managed", "repo");
+    await writeSkill(path.join(codexSkillsDir, "managed"), "managed", "codex");
+    await writeSkill(path.join(agentsSkillsDir, "managed"), "managed", "agents");
+
+    const repoHash = await hashDirectory(path.join(syncRepo, "skills", "managed"));
+    const record: SkillRecord = {
+      id: "managed",
+      name: "managed",
+      description: "",
+      status: "managed",
+      localSource: "codex",
+      installed: true,
+      syncState: "local_modified",
+      lastSyncedHash: repoHash,
+      currentRepoHash: repoHash,
+      currentLocalHash: await hashDirectory(path.join(codexSkillsDir, "managed")),
+      lastUsedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null
+    };
+    await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
+
+    const updated = await removeLocalSkill(config, "managed");
+
+    expect(existsSync(path.join(codexSkillsDir, "managed"))).toBe(false);
+    expect(existsSync(path.join(agentsSkillsDir, "managed"))).toBe(false);
+    expect(updated.installed).toBe(false);
+    expect(updated.localSource).toBeNull();
+    expect(updated.currentLocalHash).toBeNull();
+  });
 });
 
 async function writeSkill(skillDir: string, name: string, body: string): Promise<void> {

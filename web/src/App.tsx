@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import {
   Archive,
   Box,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   CircleAlert,
   Clock3,
@@ -12,21 +14,47 @@ import {
   FolderOpen,
   HardDrive,
   Layers3,
+  GitCompareArrows,
   Loader2,
   PlusCircle,
   RefreshCw,
   Save,
+  RotateCcw,
   Search,
   Settings,
   ShieldAlert,
   Trash2,
   X
 } from "lucide-react";
-import type { ApiStatus, LocalSkillSource, SkillRow, StatusReport, SyncResult, UsageHookStatus } from "./types";
+import type {
+  ApiStatus,
+  AutoSyncStatus,
+  ArchiveCopyStatus,
+  GitBranchSyncStatus,
+  LocalSkillSource,
+  DependencyInstallInfo,
+  ResolveConflictResult,
+  SkillRow,
+  SkillVersion,
+  SkillVersionsResponse,
+  StatusReport,
+  SyncResult,
+  UsageHookStatus
+} from "./types";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { Checkbox } from "./components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle
+} from "./components/ui/dialog";
 import { Input } from "./components/ui/input";
 import { Sheet, SheetContent, SheetHeader } from "./components/ui/sheet";
 import { Select } from "./components/ui/select";
@@ -42,7 +70,10 @@ const filters = [
   "unmanaged"
 ] as const;
 
+const pageSizes = [10, 20, 50, 100] as const;
+
 type Filter = (typeof filters)[number];
+type PageSize = (typeof pageSizes)[number];
 type SetupPaths = {
   syncRepo: string;
   codexSkillsDir: string;
@@ -50,12 +81,28 @@ type SetupPaths = {
   cacheDir: string;
 };
 type SetupPathField = keyof SetupPaths | "setupRoot";
-type View = "skills" | "settings";
+type View = "skills" | "settings" | "archive";
 type EditorState = {
   rowKey: string;
+  source: LocalSkillSource;
   path: string;
   content: string;
   dirty: boolean;
+};
+type SkillActionEndpoint = "import" | "install" | "update-local" | "archive" | "remove-local";
+type ArchiveRow = {
+  id: string;
+  name: string;
+  description: string;
+  archivedAt: string | null;
+  archivePath: string;
+  archiveCopyStatus: ArchiveCopyStatus;
+  status: "archived";
+};
+type ResolveStrategy = "codex" | "agents" | "repo";
+type PendingSkillAction = {
+  endpoint: SkillActionEndpoint;
+  row: SkillRow;
 };
 
 export function App() {
@@ -63,9 +110,15 @@ export function App() {
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState<PageSize>(20);
   const [view, setView] = useState<View>("skills");
   const [checkedRowKeys, setCheckedRowKeys] = useState<string[]>([]);
   const [editorState, setEditorState] = useState<EditorState | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingSkillAction | null>(null);
+  const [pendingRestore, setPendingRestore] = useState<ArchiveRow | null>(null);
+  const [pendingEditRow, setPendingEditRow] = useState<SkillRow | null>(null);
+  const [compareState, setCompareState] = useState<{ row: SkillRow; versions: SkillVersion[] } | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [setupRoot, setSetupRoot] = useState("");
   const [setupPaths, setSetupPaths] = useState<SetupPaths>({
@@ -81,8 +134,10 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  async function refresh() {
-    setLoading(true);
+  async function refresh(options: { silent?: boolean } = {}) {
+    if (!options.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const response = await fetch("/api/status");
@@ -91,7 +146,9 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load status.");
     } finally {
-      setLoading(false);
+      if (!options.silent) {
+        setLoading(false);
+      }
     }
   }
 
@@ -127,6 +184,18 @@ export function App() {
     return buildRows(status.report);
   }, [status]);
 
+  const archiveRows = useMemo(() => {
+    if (!status?.configured) {
+      return [];
+    }
+
+    return buildArchiveRows(status.report);
+  }, [status]);
+  const configured = status?.configured === true;
+  const activeView = configured ? view : "skills";
+  const report = configured ? status.report : null;
+  const autoSyncStatus = configured ? status.autoSync : null;
+
   const filteredRows = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return rows.filter((row) => {
@@ -140,6 +209,35 @@ export function App() {
     });
   }, [filter, query, rows]);
 
+  const filteredArchiveRows = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return archiveRows.filter((row) => {
+      const matchesQuery =
+        !normalized ||
+        row.id.toLowerCase().includes(normalized) ||
+        row.name.toLowerCase().includes(normalized) ||
+        row.description.toLowerCase().includes(normalized);
+      return matchesQuery;
+    });
+  }, [archiveRows, query]);
+
+  const skillPageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const archivePageCount = Math.max(1, Math.ceil(filteredArchiveRows.length / pageSize));
+  const activePageCount = activeView === "archive" ? archivePageCount : skillPageCount;
+  const pageCount = activePageCount;
+  const currentPageIndex = Math.min(pageIndex, activePageCount - 1);
+  const pageRows = useMemo(() => {
+    const start = currentPageIndex * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [currentPageIndex, filteredRows, pageSize]);
+  const archivePageRows = useMemo(() => {
+    const start = currentPageIndex * pageSize;
+    return filteredArchiveRows.slice(start, start + pageSize);
+  }, [currentPageIndex, filteredArchiveRows, pageSize]);
+  const activePageRows = activeView === "archive" ? archivePageRows : pageRows;
+  const activeFilteredRows = activeView === "archive" ? filteredArchiveRows : filteredRows;
+  const pageStart = activeFilteredRows.length === 0 ? 0 : currentPageIndex * pageSize + 1;
+  const pageEnd = activeFilteredRows.length === 0 ? 0 : Math.min(activeFilteredRows.length, pageStart + activePageRows.length - 1);
   const selected = rows.find((row) => rowKey(row) === selectedRowKey) ?? null;
   const editorRow = editorState ? rows.find((row) => rowKey(row) === editorState.rowKey) ?? null : null;
   const selectedRows = useMemo(() => {
@@ -149,15 +247,23 @@ export function App() {
   const importableSelectedRows = selectedRows.filter(canAddToSync);
   const installableSelectedRows = selectedRows.filter(canInstallLocal);
   const updatableSelectedRows = selectedRows.filter(canUpdateLocal);
-  const visibleRowsSelected = filteredRows.length > 0 && filteredRows.every((row) => checkedRowKeys.includes(rowKey(row)));
-  const someVisibleRowsSelected = filteredRows.some((row) => checkedRowKeys.includes(rowKey(row)));
-  const configured = status?.configured === true;
-  const activeView = configured ? view : "skills";
-  const report = configured ? status.report : null;
-  const repoHasPendingChanges = configured && status.gitStatus.trim().length > 0;
+  const visibleRowsSelected = activeView === "skills" && pageRows.length > 0 && pageRows.every((row) => checkedRowKeys.includes(rowKey(row)));
+  const someVisibleRowsSelected = activeView === "skills" && pageRows.some((row) => checkedRowKeys.includes(rowKey(row)));
   const cleanCount = rows.filter((row) => row.syncState === "clean").length;
   const reviewCount = rows.filter((row) => row.syncState !== "clean").length;
   const setupRepoSelected = setupPaths.syncRepo.trim().length > 0;
+
+  useEffect(() => {
+    if (!configured) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refresh({ silent: true });
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [configured]);
 
   useEffect(() => {
     if (selectedRowKey && !rows.some((row) => rowKey(row) === selectedRowKey)) {
@@ -165,6 +271,14 @@ export function App() {
       setDetailOpen(false);
     }
   }, [rows, selectedRowKey]);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [filter, pageSize, query]);
+
+  useEffect(() => {
+    setPageIndex((current) => Math.min(current, pageCount - 1));
+  }, [activePageCount]);
 
   useEffect(() => {
     const availableKeys = new Set(rows.map(rowKey));
@@ -179,6 +293,8 @@ export function App() {
 
       if (editorState) {
         setEditorState(null);
+      } else if (compareState) {
+        setCompareState(null);
       } else if (detailOpen) {
         setDetailOpen(false);
       }
@@ -186,30 +302,7 @@ export function App() {
 
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [detailOpen, editorState]);
-
-  useEffect(() => {
-    function syncShortcut(event: globalThis.KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.key.toLowerCase() !== "s") {
-        return;
-      }
-
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (target?.matches("input, textarea, select")) {
-        return;
-      }
-
-      if (!configured || activeView !== "skills" || editorState || busyId !== null || selectedRows.length === 0) {
-        return;
-      }
-
-      event.preventDefault();
-      void runSyncSelected();
-    }
-
-    window.addEventListener("keydown", syncShortcut);
-    return () => window.removeEventListener("keydown", syncShortcut);
-  }, [activeView, busyId, configured, editorState, selectedRows]);
+  }, [compareState, detailOpen, editorState]);
 
   async function initialize() {
     setError(null);
@@ -296,14 +389,16 @@ export function App() {
     }
   }
 
-  async function runSkillAction(
-    endpoint: "import" | "install" | "update-local" | "archive" | "remove-local",
-    row: SkillRow
-  ) {
-    if (!confirmSkillAction(endpoint, row)) {
+  function requestSkillAction(endpoint: SkillActionEndpoint, row: SkillRow) {
+    if (requiresConfirmation(endpoint)) {
+      setPendingAction({ endpoint, row });
       return;
     }
 
+    void runSkillAction(endpoint, row);
+  }
+
+  async function runSkillAction(endpoint: SkillActionEndpoint, row: SkillRow): Promise<boolean> {
     setError(null);
     setNotice(null);
     setBusyId(actionBusyId(endpoint, row));
@@ -316,12 +411,87 @@ export function App() {
       if (!response.ok) {
         throw new Error(await readError(response));
       }
-      await refresh();
-      setSelectedRowKey(endpoint === "import" && row.source !== "repo" ? `managed:${row.source}:${row.id}` : rowKey(row));
+      const payload = (await response.json()) as { result?: SyncResult; dependencyInstall?: DependencyInstallInfo };
+      const messages: string[] = [];
+      if (payload.result) {
+        messages.push(syncResultMessage(payload.result));
+      }
+      if (payload.dependencyInstall) {
+        const dependencyMessage = dependencyInstallMessage(payload.dependencyInstall);
+        if (dependencyMessage) {
+          messages.push(dependencyMessage);
+        }
+      }
+      if (messages.length > 0) {
+        setNotice(messages.join(" "));
+      }
+      await refresh({ silent: true });
+      setSelectedRowKey(endpoint === "import" ? `managed:${row.id}` : rowKey(row));
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : `${endpoint} failed.`);
+      return false;
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function confirmPendingAction() {
+    if (!pendingAction) {
+      return;
+    }
+
+    const completed = await runSkillAction(pendingAction.endpoint, pendingAction.row);
+    if (completed) {
+      setPendingAction(null);
+    }
+  }
+
+  function requestRestore(row: ArchiveRow) {
+    setPendingRestore(row);
+  }
+
+  async function runRestoreArchived(row: ArchiveRow): Promise<boolean> {
+    const busyKey = restoreBusyId(row);
+    const payloadForNotice = row.name || row.id;
+    setError(null);
+    setNotice(null);
+    setBusyId(busyKey);
+    try {
+      const response = await fetch("/api/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId: row.id })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      const payload = (await response.json()) as { result?: SyncResult };
+      if (payload.result) {
+        setNotice(syncResultMessage(payload.result));
+      } else {
+        setNotice(`Restored ${payloadForNotice}.`);
+      }
+
+      await refresh({ silent: true });
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Restore ${payloadForNotice} failed.`);
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function confirmPendingRestore() {
+    if (!pendingRestore) {
+      return;
+    }
+
+    const completed = await runRestoreArchived(pendingRestore);
+    if (completed) {
+      setPendingRestore(null);
     }
   }
 
@@ -334,20 +504,30 @@ export function App() {
     setNotice(null);
     setBusyId(`bulk:${endpoint}`);
     try {
-      for (const row of targetRows) {
-        const response = await fetch(`/api/${endpoint}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(skillActionBody(row))
-        });
-        if (!response.ok) {
-          throw new Error(await readError(response));
-        }
+      const response = await fetch("/api/bulk-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint, skills: targetRows.map(skillActionBody) })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
       }
 
+      const payload = (await response.json()) as { result?: SyncResult; dependencyInstalls?: Array<DependencyInstallInfo & { skillId: string }> };
+      const messages: string[] = [];
+      if (payload.result) {
+        messages.push(syncResultMessage(payload.result));
+      }
+      const installedDependencyCount = payload.dependencyInstalls?.filter((install) => install.status === "installed").length ?? 0;
+      if (installedDependencyCount > 0) {
+        messages.push(`Installed dependencies for ${installedDependencyCount} skill${installedDependencyCount === 1 ? "" : "s"}.`);
+      }
+      if (messages.length > 0) {
+        setNotice(messages.join(" "));
+      }
       const completedKeys = new Set(targetRows.map(rowKey));
       setCheckedRowKeys((current) => current.filter((key) => !completedKeys.has(key)));
-      await refresh();
+      await refresh({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Bulk action failed.");
     } finally {
@@ -368,7 +548,7 @@ export function App() {
         throw new Error(await readError(response));
       }
 
-      await refresh();
+      await refresh({ silent: true });
       setNotice("Pulled latest changes from sync repository.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Pull failed.");
@@ -433,8 +613,24 @@ export function App() {
     });
   }
 
-  async function openSkillEditor(row: SkillRow) {
+  function requestSkillEditor(row: SkillRow) {
     if (!canEditLocal(row)) {
+      return;
+    }
+
+    if (row.localSources.length > 1) {
+      setPendingEditRow(row);
+      return;
+    }
+
+    const source = row.localSources[0];
+    if (source) {
+      void openSkillEditor(row, source);
+    }
+  }
+
+  async function openSkillEditor(row: SkillRow, source: LocalSkillSource) {
+    if (!canEditLocal(row) || !localSourcesForRow(row).includes(source)) {
       return;
     }
 
@@ -446,7 +642,7 @@ export function App() {
       const response = await fetch("/api/skill-file", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(skillActionBody(row))
+        body: JSON.stringify({ skillId: row.id, source })
       });
       if (!response.ok) {
         throw new Error(await readError(response));
@@ -455,7 +651,7 @@ export function App() {
       const payload = (await response.json()) as { path: string; content: string };
       setSelectedRowKey(key);
       setDetailOpen(false);
-      setEditorState({ rowKey: key, path: payload.path, content: payload.content, dirty: false });
+      setEditorState({ rowKey: key, source, path: payload.path, content: payload.content, dirty: false });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to open SKILL.md.");
     } finally {
@@ -476,14 +672,14 @@ export function App() {
       const response = await fetch("/api/skill-file", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...skillActionBody(row), content: editorState.content })
+        body: JSON.stringify({ skillId: row.id, source: editorState.source, content: editorState.content })
       });
       if (!response.ok) {
         throw new Error(await readError(response));
       }
 
       setEditorState((current) => (current?.rowKey === key ? { ...current, dirty: false } : current));
-      await refresh();
+      await refresh({ silent: true });
       setSelectedRowKey(key);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save SKILL.md.");
@@ -492,37 +688,74 @@ export function App() {
     }
   }
 
-  async function runSyncSelected() {
-    if (!configured || busyId !== null || (selectedRows.length === 0 && !repoHasPendingChanges)) {
-      return;
-    }
-
+  async function openCompareVersions(row: SkillRow) {
+    const key = rowKey(row);
     setError(null);
     setNotice(null);
-    setBusyId("sync");
+    setBusyId(`compare:${key}`);
     try {
-      const response = await fetch("/api/sync", {
+      const response = await fetch("/api/skill-versions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(syncActionBody(selectedRows))
+        body: JSON.stringify({ skillId: row.id })
       });
       if (!response.ok) {
         throw new Error(await readError(response));
       }
 
-      const payload = (await response.json()) as { result: SyncResult };
-      setNotice(syncResultMessage(payload.result));
-      setCheckedRowKeys([]);
-      await refresh();
+      const payload = (await response.json()) as SkillVersionsResponse;
+      setCompareState({ row, versions: payload.versions });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sync failed.");
+      setError(err instanceof Error ? err.message : "Unable to load version snapshot.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function runCompareVersionResolution(strategy: ResolveStrategy) {
+    if (!compareState) {
+      return;
+    }
+
+    await runResolveConflictWithTarget(strategy, compareState.row);
+  }
+
+  async function runResolveConflictWithTarget(
+    strategy: ResolveStrategy,
+    targetRow: SkillRow
+  ) {
+    const key = rowKey(targetRow);
+    setError(null);
+    setNotice(null);
+    setBusyId(compareResolveBusyId(targetRow, strategy));
+    try {
+      const response = await fetch("/api/resolve-conflict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId: targetRow.id, strategy })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      const payload = (await response.json()) as ResolveConflictResult;
+      if (payload.result) {
+        setNotice(syncResultMessage(payload.result));
+      } else {
+        setNotice(`Resolved ${targetRow.name || targetRow.id} with ${strategy} copy.`);
+      }
+      setCompareState(null);
+      await refresh({ silent: true });
+      setSelectedRowKey(key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Conflict resolution failed.");
     } finally {
       setBusyId(null);
     }
   }
 
   function toggleVisibleRows(checked: boolean) {
-    const visibleKeys = filteredRows.map(rowKey);
+    const visibleKeys = pageRows.map(rowKey);
     setCheckedRowKeys((current) => {
       if (!checked) {
         return current.filter((key) => !visibleKeys.includes(key));
@@ -568,10 +801,20 @@ export function App() {
             Usage
             <span>Planned</span>
           </Button>
-          <Button className="nav-item disabled" variant="outline" size="sm" type="button" disabled>
+          <Button
+            className={configured && activeView === "archive" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={() => {
+              if (configured) {
+                setView("archive");
+              }
+            }}
+            disabled={!configured}
+          >
             <Archive size={16} aria-hidden="true" />
             Archive
-            <span>Planned</span>
           </Button>
           <Button
             className={configured && activeView === "settings" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
@@ -596,7 +839,7 @@ export function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Codex Skill Manager</p>
-            <h1>{activeView === "settings" ? "Settings" : "Skills"}</h1>
+            <h1>{activeView === "settings" ? "Settings" : activeView === "archive" ? "Archive" : "Skills"}</h1>
           </div>
           <div className="topbar-actions">
             <Button variant="secondary" size="sm" type="button" onClick={() => void refresh()}>
@@ -613,16 +856,7 @@ export function App() {
               {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
               Pull
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              type="button"
-              onClick={() => void runSyncSelected()}
-              disabled={!configured || activeView !== "skills" || busyId !== null || (selectedRows.length === 0 && !repoHasPendingChanges)}
-            >
-              {busyId === "sync" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
-              {selectedRows.length > 0 ? "Sync selected" : repoHasPendingChanges ? "Sync repo changes" : "Sync selected"}
-            </Button>
+            {autoSyncStatus ? <AutoSyncIndicator status={autoSyncStatus} /> : null}
           </div>
         </header>
 
@@ -753,10 +987,13 @@ export function App() {
                   <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Codex skills" value={report?.codexSkillsDir ?? ""} />
                   <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Agents skills" value={report?.agentsSkillsDir ?? ""} />
                 </div>
-                <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => setView("settings")}>
-                  <Settings size={14} aria-hidden="true" />
-                  Change paths
-                </Button>
+                <div className="path-stack-controls">
+                  <BranchSyncBadge status={status.gitBranchStatus} />
+                  <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => setView("settings")}>
+                    <Settings size={14} aria-hidden="true" />
+                    Change paths
+                  </Button>
+                </div>
               </div>
             </section>
 
@@ -790,15 +1027,6 @@ export function App() {
                   <strong>{selectedRows.length}</strong>
                   <span>{selectedRows.length === 1 ? "skill selected" : "skills selected"}</span>
                 </div>
-                <Button
-                  className="button primary"
-                  type="button"
-                  onClick={() => void runSyncSelected()}
-                  disabled={busyId !== null || selectedRows.length === 0}
-                >
-                  {busyId === "sync" ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
-                  Sync selected
-                </Button>
                 <Button
                   className="button secondary"
                   type="button"
@@ -856,56 +1084,239 @@ export function App() {
                   <span>Action</span>
                 </div>
 
-              {loading ? <SkeletonRows /> : null}
+                {loading ? <SkeletonRows /> : null}
 
-              {!loading && filteredRows.length === 0 ? (
-                <div className="empty-state">
-                  <h2>No skills match this view</h2>
-                  <p>Clear the search or switch filters to see available local and managed skills.</p>
-                </div>
-              ) : null}
-
-              {!loading &&
-                filteredRows.map((row) => (
-                  <div
-                    tabIndex={0}
-                    className={selected && rowKey(selected) === rowKey(row) ? "skill-row selected" : "skill-row"}
-                    key={rowKey(row)}
-                    onClick={() => {
-                      setSelectedRowKey(rowKey(row));
-                      setDetailOpen(true);
-                    }}
-                    onKeyDown={(event) =>
-                      selectRowWithKeyboard(event, rowKey(row), (key) => {
-                        setSelectedRowKey(key);
-                        setDetailOpen(true);
-                      })
-                    }
-                  >
-                    <label className="row-checkbox" onClick={(event) => event.stopPropagation()}>
-                      <Checkbox
-                        checked={checkedRowKeys.includes(rowKey(row))}
-                        onChange={(event) => toggleRowChecked(row, event.target.checked)}
-                        aria-label={`Select ${row.name || row.id}`}
-                      />
-                    </label>
-                    <span className="skill-main">
-                      <strong>{row.name || row.id}</strong>
-                      <small>{row.id}</small>
-                    </span>
-                    <span>
-                      <Badge variant="outline" className={`source-badge ${row.source}`}>
-                        {sourceLabel(row.source)}
-                      </Badge>
-                    </span>
-                    <SyncBadge state={row.syncState} />
-                    <span className={row.installed ? "install-state installed" : "install-state"}>
-                      {row.installed ? "Installed" : "Missing"}
-                    </span>
-                    <span>{formatLastUsed(row.lastUsedAt)}</span>
-                    <RowAction row={row} busyId={busyId} onAction={runSkillAction} onEdit={openSkillEditor} />
+                {!loading && filteredRows.length === 0 ? (
+                  <div className="empty-state">
+                    <h2>No skills match this view</h2>
+                    <p>Clear the search or switch filters to see available local and managed skills.</p>
                   </div>
-                ))}
+                ) : null}
+
+                {!loading &&
+                  pageRows.map((row) => (
+                    <div
+                      tabIndex={0}
+                      className={selected && rowKey(selected) === rowKey(row) ? "skill-row selected" : "skill-row"}
+                      key={rowKey(row)}
+                      onClick={() => {
+                        setSelectedRowKey(rowKey(row));
+                        setDetailOpen(true);
+                      }}
+                      onKeyDown={(event) =>
+                        selectRowWithKeyboard(event, rowKey(row), (key) => {
+                          setSelectedRowKey(key);
+                          setDetailOpen(true);
+                        })
+                      }
+                    >
+                      <label className="row-checkbox" onClick={(event) => event.stopPropagation()}>
+                        <Checkbox
+                          checked={checkedRowKeys.includes(rowKey(row))}
+                          onChange={(event) => toggleRowChecked(row, event.target.checked)}
+                          aria-label={`Select ${row.name || row.id}`}
+                        />
+                      </label>
+                      <span className="skill-main">
+                        <strong>{row.name || row.id}</strong>
+                        <small>{row.id}</small>
+                      </span>
+                      <span>
+                        <Badge variant="outline" className={`source-badge ${row.source}`}>
+                          {sourceLabel(row.source)}
+                        </Badge>
+                      </span>
+                      <SyncBadge state={row.syncState} />
+                      <span className={row.installed ? "install-state installed" : "install-state"}>
+                        {row.installed ? "Installed" : "Missing"}
+                      </span>
+                      <span>{formatLastUsed(row.lastUsedAt)}</span>
+                      <RowAction
+                        row={row}
+                        busyId={busyId}
+                        onAction={requestSkillAction}
+                        onEdit={requestSkillEditor}
+                        onCompare={() => void openCompareVersions(row)}
+                      />
+                    </div>
+                  ))}
+              </div>
+              <div className="pagination-bar" aria-label="Skill table pagination">
+                <div className="pagination-summary">
+                  <strong>{filteredRows.length === 0 ? "0" : `${pageStart}-${pageEnd}`}</strong>
+                  <span>of {filteredRows.length}</span>
+                </div>
+                <label className="page-size-select">
+                  <span>Rows</span>
+                  <Select
+                    value={String(pageSize)}
+                    onChange={(event) => setPageSize(Number(event.target.value) as PageSize)}
+                    aria-label="Rows per page"
+                  >
+                    {pageSizes.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <div className="pagination-actions">
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+                    disabled={loading || filteredRows.length === 0 || currentPageIndex === 0}
+                    aria-label="Previous page"
+                    title="Previous page"
+                  >
+                    <ChevronLeft size={15} aria-hidden="true" />
+                  </Button>
+                  <span className="pagination-page">
+                    Page {currentPageIndex + 1} / {pageCount}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))}
+                    disabled={loading || filteredRows.length === 0 || currentPageIndex >= pageCount - 1}
+                    aria-label="Next page"
+                    title="Next page"
+                  >
+                    <ChevronRight size={15} aria-hidden="true" />
+                  </Button>
+                </div>
+              </div>
+            </section>
+          </Card>
+        ) : null}
+
+        {configured && activeView === "archive" ? (
+          <Card className="skill-panel">
+            <section className="repo-strip" aria-label="Archive status">
+              <StatusTile label="Archived" value={String(report?.archived.length ?? 0)} tone="neutral" />
+              <StatusTile
+                label="Copy present"
+                value={String(report?.archived.filter((row) => row.archiveCopyStatus === "present").length ?? 0)}
+                tone="good"
+              />
+              <StatusTile
+                label="Copy missing"
+                value={String(report?.archived.filter((row) => row.archiveCopyStatus === "missing").length ?? 0)}
+                tone="risk"
+              />
+              <div className="path-stack">
+                <div className="path-stack-lines">
+                  <PathLine icon={<FolderGit2 size={14} aria-hidden="true" />} label="Sync repo" value={report?.syncRepo ?? ""} />
+                  <PathLine icon={<Archive size={14} aria-hidden="true" />} label="Archive root" value={report?.syncRepo ? `${report.syncRepo}/archive` : ""} />
+                </div>
+                <div className="path-stack-controls">
+                  <BranchSyncBadge status={status.gitBranchStatus} />
+                </div>
+              </div>
+            </section>
+
+            <section className="toolbar" aria-label="Archive filters">
+              <label className="search-box">
+                <Search size={16} aria-hidden="true" />
+                <span className="sr-only">Search archived skills</span>
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Search archived skills"
+                  autoComplete="off"
+                />
+              </label>
+            </section>
+
+            <section className="skill-list" aria-label="Archived skills">
+              <div className="skill-table-scroll">
+                <div className="table-head archive-table-head" role="row">
+                  <span>Name</span>
+                  <span>Archived at</span>
+                  <span>Archive path</span>
+                  <span>Copy</span>
+                  <span>Action</span>
+                </div>
+
+                {loading ? <SkeletonRows /> : null}
+
+                {!loading && filteredArchiveRows.length === 0 ? (
+                  <div className="empty-state">
+                    <h2>No archived skills</h2>
+                    <p>When you archive a tracked skill, it appears here.</p>
+                  </div>
+                  ) : null}
+
+                {!loading &&
+                  archivePageRows.map((row) => (
+                    <div className="skill-row archive-row" key={`archive:${row.id}`} tabIndex={0}>
+                      <span className="skill-main">
+                        <strong>{row.name || row.id}</strong>
+                        <small>{row.id}</small>
+                      </span>
+                      <span>{formatArchiveDate(row.archivedAt)}</span>
+                      <code>{row.archivePath}</code>
+                      <ArchiveCopyBadge status={row.archiveCopyStatus} />
+                      <span className="row-actions">
+                        <ActionIconButton
+                          label={`Restore ${row.name || row.id}`}
+                          busy={busyId === restoreBusyId(row)}
+                          disabled={busyId !== null && busyId !== restoreBusyId(row)}
+                          icon={<RotateCcw size={14} aria-hidden="true" />}
+                          onClick={() => requestRestore(row)}
+                        />
+                      </span>
+                    </div>
+                  ))}
+              </div>
+              <div className="pagination-bar" aria-label="Archived skill pagination">
+                <div className="pagination-summary">
+                  <strong>{filteredArchiveRows.length === 0 ? "0" : `${pageStart}-${pageEnd}`}</strong>
+                  <span>of {filteredArchiveRows.length}</span>
+                </div>
+                <label className="page-size-select">
+                  <span>Rows</span>
+                  <Select
+                    value={String(pageSize)}
+                    onChange={(event) => setPageSize(Number(event.target.value) as PageSize)}
+                    aria-label="Rows per page"
+                  >
+                    {pageSizes.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <div className="pagination-actions">
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+                    disabled={loading || filteredArchiveRows.length === 0 || currentPageIndex === 0}
+                    aria-label="Previous page"
+                    title="Previous page"
+                  >
+                    <ChevronLeft size={15} aria-hidden="true" />
+                  </Button>
+                  <span className="pagination-page">
+                    Page {currentPageIndex + 1} / {pageCount}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))}
+                    disabled={loading || filteredArchiveRows.length === 0 || currentPageIndex >= pageCount - 1}
+                    aria-label="Next page"
+                    title="Next page"
+                  >
+                    <ChevronRight size={15} aria-hidden="true" />
+                  </Button>
+                </div>
               </div>
             </section>
           </Card>
@@ -928,6 +1339,37 @@ export function App() {
           }}
         />
       ) : null}
+
+      <ConfirmActionDialog
+        action={pendingAction}
+        busyId={busyId}
+        onClose={() => setPendingAction(null)}
+        onConfirm={() => void confirmPendingAction()}
+      />
+
+      <EditSourceDialog
+        row={pendingEditRow}
+        busyId={busyId}
+        onClose={() => setPendingEditRow(null)}
+        onChoose={(row, source) => {
+          setPendingEditRow(null);
+          void openSkillEditor(row, source);
+        }}
+      />
+
+      <CompareVersionsDialog
+        state={compareState}
+        busyId={busyId}
+        onClose={() => setCompareState(null)}
+        onAcceptVersion={runCompareVersionResolution}
+      />
+
+      <RestoreArchiveDialog
+        row={pendingRestore}
+        busyId={busyId}
+        onClose={() => setPendingRestore(null)}
+        onConfirm={() => void confirmPendingRestore()}
+      />
     </div>
   );
 }
@@ -1181,54 +1623,61 @@ function SelectAllCheckbox({
   );
 }
 
-function buildRows(report: StatusReport): SkillRow[] {
-  const managed: SkillRow[] = report.managed.map((skill) => ({
-    kind: "managed",
-    id: skill.id,
-    name: skill.name,
-    description: skill.description,
-    status: skill.status,
-    syncState: skill.syncState,
-    installed: skill.installed,
-    source: skill.localSource ?? "codex",
-    repoHash: skill.currentRepoHash,
-    localHash: skill.currentLocalHash,
-    lastUsedAt: skill.lastUsedAt,
-    repoPath: `${report.syncRepo}/skills/${skill.id}`,
-    localPath: `${localRootForSource(report, skill.localSource ?? "codex")}/${skill.id}`,
-    updatedAt: skill.updatedAt
-  }));
+function buildArchiveRows(report: StatusReport): ArchiveRow[] {
+  return report.archived
+    .map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      archivedAt: skill.archivedAt,
+      archivePath: skill.archivePath ?? `${report.syncRepo}/archive/${skill.id}`,
+      archiveCopyStatus: skill.archiveCopyStatus ?? "missing",
+      status: "archived" as const
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
 
-  const unmanaged: SkillRow[] = report.unmanagedLocal.map((skill) => ({
-    kind: "unmanaged",
-    id: skill.id,
-    name: skill.name,
-    description: skill.description,
-    syncState: "unmanaged",
-    source: skill.source === "agents" ? "agents" : "codex",
-    installed: true,
-    repoHash: null,
-    localHash: skill.hash,
-    lastUsedAt: null,
-    repoPath: null,
-    localPath: skill.path,
-    updatedAt: null
-  }));
+function buildRows(report: StatusReport): SkillRow[] {
+  const managed: SkillRow[] = report.managed.map((skill) => {
+    const localSources = normalizeLocalSources(skill.localSources ?? (skill.localSource ? [skill.localSource] : []));
+    return {
+      kind: "managed",
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      status: skill.status,
+      syncState: skill.syncState,
+      installed: skill.installed,
+      source: sourceForLocalSources(localSources, skill.installed ? "codex" : "repo"),
+      localSources,
+      localCopiesDiffer: skill.localCopiesDiffer ?? false,
+      repoHash: skill.currentRepoHash,
+      localHash: skill.currentLocalHash,
+      lastUsedAt: skill.lastUsedAt,
+      repoPath: `${report.syncRepo}/skills/${skill.id}`,
+      localPath: formatLocalPaths(report, skill.id, localSources),
+      localModifiedAt: skill.localModifiedAt ?? null
+    };
+  });
+
+  const unmanaged: SkillRow[] = groupUnmanagedRows(report);
 
   const repoOnly: SkillRow[] = report.repoOnly.map((skill) => ({
     kind: "repo-only",
     id: skill.id,
     name: skill.name,
     description: skill.description,
-    syncState: "repo_only",
-    source: "repo",
-    installed: false,
+      syncState: "repo_only",
+      source: "repo",
+      localSources: [],
+      localCopiesDiffer: false,
+      installed: false,
     repoHash: skill.hash,
     localHash: null,
     lastUsedAt: null,
     repoPath: skill.path,
     localPath: null,
-    updatedAt: null
+    localModifiedAt: null
   }));
 
   return [...managed, ...unmanaged, ...repoOnly].sort((a, b) => a.id.localeCompare(b.id));
@@ -1238,8 +1687,78 @@ function localRootForSource(report: StatusReport, source: LocalSkillSource): str
   return source === "agents" ? report.agentsSkillsDir : report.codexSkillsDir;
 }
 
+function groupUnmanagedRows(report: StatusReport): SkillRow[] {
+  const grouped = new Map<string, typeof report.unmanagedLocal>();
+  for (const skill of report.unmanagedLocal) {
+    const existing = grouped.get(skill.id) ?? [];
+    existing.push(skill);
+    grouped.set(skill.id, existing);
+  }
+
+  return [...grouped.values()].map((skills) => {
+    const preferred = skills.find((skill) => skill.source === "codex") ?? skills[0];
+    const localSources = normalizeLocalSources(
+      skills
+        .map((skill) => skill.source)
+        .filter((source): source is LocalSkillSource => source === "codex" || source === "agents")
+    );
+
+    return {
+      kind: "unmanaged",
+      id: preferred.id,
+      name: preferred.name,
+      description: preferred.description,
+      syncState: "unmanaged",
+      source: sourceForLocalSources(localSources, "codex"),
+      localSources,
+      localCopiesDiffer: localCandidateHashes(skills).length > 1,
+      installed: true,
+      repoHash: null,
+      localHash: preferred.hash,
+      lastUsedAt: null,
+      repoPath: null,
+      localPath: skills
+        .map((skill) => `${sourceLabel(skill.source === "agents" ? "agents" : "codex")}: ${skill.path}`)
+        .join("\n"),
+      localModifiedAt: latestScannedModifiedAt(skills)
+    };
+  });
+}
+
+function latestScannedModifiedAt(skills: Array<{ modifiedAt: string }>): string | null {
+  if (skills.length === 0) {
+    return null;
+  }
+
+  return skills.map((skill) => skill.modifiedAt).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
+}
+
+function localCandidateHashes(skills: Array<{ hash: string }>): string[] {
+  return [...new Set(skills.map((skill) => skill.hash))];
+}
+
+function normalizeLocalSources(sources: LocalSkillSource[]): LocalSkillSource[] {
+  return [...new Set(sources)].sort((a, b) => a.localeCompare(b));
+}
+
+function sourceForLocalSources(sources: LocalSkillSource[], fallback: LocalSkillSource | "repo"): SkillRow["source"] {
+  if (sources.length > 1) {
+    return "both";
+  }
+
+  return sources[0] ?? fallback;
+}
+
+function formatLocalPaths(report: StatusReport, skillId: string, sources: LocalSkillSource[]): string {
+  if (sources.length === 0) {
+    return "Missing on this machine";
+  }
+
+  return sources.map((source) => `${sourceLabel(source)}: ${localRootForSource(report, source)}/${skillId}`).join("\n");
+}
+
 function rowKey(row: SkillRow) {
-  return `${row.kind}:${row.source}:${row.id}`;
+  return `${row.kind}:${row.id}`;
 }
 
 function canAddToSync(row: SkillRow) {
@@ -1254,8 +1773,12 @@ function canUpdateLocal(row: SkillRow) {
   return row.kind === "managed" && row.syncState === "repo_modified";
 }
 
+function canCompareVersions(row: SkillRow) {
+  return row.kind === "managed" && row.syncState === "conflict";
+}
+
 function canEditLocal(row: SkillRow) {
-  return row.installed && (row.source === "codex" || row.source === "agents") && Boolean(row.localPath);
+  return row.installed && row.localSources.length > 0;
 }
 
 function canArchive(row: SkillRow) {
@@ -1263,15 +1786,15 @@ function canArchive(row: SkillRow) {
 }
 
 function canRemoveLocal(row: SkillRow) {
-  return row.installed && (row.source === "codex" || row.source === "agents");
+  return row.installed && row.localSources.length > 0;
+}
+
+function localSourcesForRow(row: SkillRow): LocalSkillSource[] {
+  return [...row.localSources] as LocalSkillSource[];
 }
 
 function skillActionBody(row: SkillRow): { skillId: string; source?: LocalSkillSource } {
-  return row.source === "codex" || row.source === "agents" ? { skillId: row.id, source: row.source } : { skillId: row.id };
-}
-
-function syncActionBody(rows: SkillRow[]): { skills: Array<{ skillId: string; source?: LocalSkillSource }> } {
-  return { skills: rows.map(skillActionBody) };
+  return row.localSources.length === 1 ? { skillId: row.id, source: row.localSources[0] } : { skillId: row.id };
 }
 
 function syncResultMessage(result: SyncResult) {
@@ -1291,20 +1814,28 @@ function syncResultMessage(result: SyncResult) {
   return `No new commit was needed. Pushed ${target}.`;
 }
 
-function actionBusyId(endpoint: "import" | "install" | "update-local" | "archive" | "remove-local", row: SkillRow) {
+function dependencyInstallMessage(result: DependencyInstallInfo) {
+  if (result.status !== "installed") {
+    return null;
+  }
+
+  return result.message;
+}
+
+function actionBusyId(endpoint: SkillActionEndpoint | "compare", row: SkillRow) {
   return `${endpoint}:${rowKey(row)}`;
 }
 
-function confirmSkillAction(endpoint: "import" | "install" | "update-local" | "archive" | "remove-local", row: SkillRow) {
-  if (endpoint === "archive") {
-    return window.confirm(`Archive "${row.name || row.id}" in the sync repository? The local copy is not removed.`);
-  }
+function compareResolveBusyId(row: SkillRow, strategy: ResolveStrategy) {
+  return `compare-resolve:${rowKey(row)}:${strategy}`;
+}
 
-  if (endpoint === "remove-local") {
-    return window.confirm(`Remove the local copy of "${row.name || row.id}" from this machine? The sync repository copy is not archived.`);
-  }
+function restoreBusyId(row: ArchiveRow) {
+  return `restore:${row.id}`;
+}
 
-  return true;
+function requiresConfirmation(endpoint: SkillActionEndpoint) {
+  return endpoint === "archive" || endpoint === "remove-local";
 }
 
 function StatusTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "good" | "risk" }) {
@@ -1339,19 +1870,56 @@ function SyncBadge({ state }: { state: SkillRow["syncState"] }) {
   );
 }
 
+function ArchiveCopyBadge({ status }: { status: ArchiveCopyStatus }) {
+  const variant: "success" | "destructive" = status === "present" ? "success" : "destructive";
+  const label = status === "present" ? "Present" : "Missing";
+
+  return (
+    <Badge variant={variant} className={`archive-copy-badge ${status}`}>
+      {label}
+    </Badge>
+  );
+}
+
+function AutoSyncIndicator({ status }: { status: AutoSyncStatus }) {
+  const text = formatAutoSyncLabel(status);
+  const isActive = status.enabled;
+  const classes = `auto-sync-indicator ${isActive ? `mode-${status.mode}` : "mode-disabled"}${status.running ? " running" : ""}`;
+  const tooltip = status.lastError ? `Auto-sync blocked: ${status.lastError}` : statusMessage(status);
+
+  return (
+    <span className={classes} title={tooltip} role="status" aria-live="polite">
+      {status.running ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
+      {text}
+    </span>
+  );
+}
+
+function BranchSyncBadge({ status }: { status: GitBranchSyncStatus }) {
+  const label = branchSyncLabel(status);
+  const needsAttention = status.state === "ahead" || status.state === "behind" || status.state === "diverged";
+  const className = `branch-sync-badge ${status.state}${needsAttention ? " attention" : ""}`;
+
+  return (
+    <span className={className} title={branchSyncTitle(status)} role="status" aria-live="polite">
+      {needsAttention ? <CircleAlert size={13} aria-hidden="true" /> : <CheckCircle2 size={13} aria-hidden="true" />}
+      {label}
+    </span>
+  );
+}
+
 function RowAction({
   row,
   busyId,
   onAction,
-  onEdit
+  onEdit,
+  onCompare
 }: {
   row: SkillRow;
   busyId: string | null;
-  onAction: (
-    endpoint: "import" | "install" | "update-local" | "archive" | "remove-local",
-    row: SkillRow
-  ) => Promise<void>;
-  onEdit: (row: SkillRow) => Promise<void>;
+  onAction: (endpoint: SkillActionEndpoint, row: SkillRow) => void;
+  onEdit: (row: SkillRow) => void;
+  onCompare: (row: SkillRow) => void;
 }) {
   const importBusy = busyId === actionBusyId("import", row);
   const installBusy = busyId === actionBusyId("install", row);
@@ -1359,7 +1927,15 @@ function RowAction({
   const archiveBusy = busyId === actionBusyId("archive", row);
   const removeBusy = busyId === actionBusyId("remove-local", row);
   const editBusy = busyId === `editor-open:${rowKey(row)}`;
-  const hasAction = canEditLocal(row) || canAddToSync(row) || canInstallLocal(row) || canUpdateLocal(row) || canArchive(row) || canRemoveLocal(row);
+  const compareBusy = busyId === actionBusyId("compare", row);
+  const hasAction =
+    canCompareVersions(row) ||
+    canEditLocal(row) ||
+    canAddToSync(row) ||
+    canInstallLocal(row) ||
+    canUpdateLocal(row) ||
+    canArchive(row) ||
+    canRemoveLocal(row);
 
   if (!hasAction) {
     return <span className="row-actions muted">View</span>;
@@ -1368,103 +1944,415 @@ function RowAction({
   return (
     <span className="row-actions">
       {canEditLocal(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onEdit(row);
-          }}
+        <ActionIconButton
+          label="Edit local SKILL.md"
+          busy={editBusy}
           disabled={busyId !== null && !editBusy}
-        >
-          {editBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <FilePenLine size={14} aria-hidden="true" />}
-          Edit
-        </Button>
+          icon={<FilePenLine size={14} aria-hidden="true" />}
+          onClick={() => onEdit(row)}
+        />
       ) : null}
       {canAddToSync(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onAction("import", row);
-          }}
+        <ActionIconButton
+          label="Add to sync"
+          busy={importBusy}
           disabled={busyId !== null && !importBusy}
-        >
-          {importBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <PlusCircle size={14} aria-hidden="true" />}
-          Add to sync
-        </Button>
+          icon={<PlusCircle size={14} aria-hidden="true" />}
+          onClick={() => onAction("import", row)}
+        />
       ) : null}
       {canInstallLocal(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onAction("install", row);
-          }}
+        <ActionIconButton
+          label="Install local"
+          busy={installBusy}
           disabled={busyId !== null && !installBusy}
-        >
-          {installBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
-          Install local
-        </Button>
+          icon={<Download size={14} aria-hidden="true" />}
+          onClick={() => onAction("install", row)}
+        />
       ) : null}
       {canUpdateLocal(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onAction("update-local", row);
-          }}
+        <ActionIconButton
+          label="Update local"
+          busy={updateBusy}
           disabled={busyId !== null && !updateBusy}
-        >
-          {updateBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
-          Update local
-        </Button>
+          icon={<Download size={14} aria-hidden="true" />}
+          onClick={() => onAction("update-local", row)}
+        />
+      ) : null}
+      {canCompareVersions(row) ? (
+        <ActionIconButton
+          label="Compare versions"
+          busy={compareBusy}
+          disabled={busyId !== null && !compareBusy}
+          icon={<GitCompareArrows size={14} aria-hidden="true" />}
+          onClick={() => onCompare(row)}
+        />
       ) : null}
       {canArchive(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onAction("archive", row);
-          }}
+        <ActionIconButton
+          label="Stop syncing"
+          busy={archiveBusy}
           disabled={busyId !== null && !archiveBusy}
-        >
-          {archiveBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Archive size={14} aria-hidden="true" />}
-          Archive repo
-        </Button>
+          icon={<Archive size={14} aria-hidden="true" />}
+          onClick={() => onAction("archive", row)}
+        />
       ) : null}
       {canRemoveLocal(row) ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="row-action"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onAction("remove-local", row);
-          }}
+        <ActionIconButton
+          label={row.localSources.length > 1 ? "Remove local copies" : "Remove local copy"}
+          busy={removeBusy}
           disabled={busyId !== null && !removeBusy}
-        >
-          {removeBusy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
-          Remove local
-        </Button>
+          icon={<Trash2 size={14} aria-hidden="true" />}
+          tone="danger"
+          onClick={() => onAction("remove-local", row)}
+        />
       ) : null}
     </span>
   );
+}
+
+function ActionIconButton({
+  label,
+  busy,
+  disabled,
+  icon,
+  tone,
+  onClick
+}: {
+  label: string;
+  busy: boolean;
+  disabled: boolean;
+  icon: ReactNode;
+  tone?: "danger";
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={`row-action icon-only${tone ? ` ${tone}` : ""}`}
+      type="button"
+      aria-label={label}
+      title={label}
+      data-tooltip={label}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      disabled={disabled}
+    >
+      {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : icon}
+      <span className="sr-only">{label}</span>
+    </Button>
+  );
+}
+
+function EditSourceDialog({
+  row,
+  busyId,
+  onClose,
+  onChoose
+}: {
+  row: SkillRow | null;
+  busyId: string | null;
+  onClose: () => void;
+  onChoose: (row: SkillRow, source: LocalSkillSource) => void;
+}) {
+  const busy = row ? busyId === `editor-open:${rowKey(row)}` : false;
+
+  return (
+    <Dialog
+      open={Boolean(row)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {row ? (
+          <DialogContent className="confirm-dialog edit-source-dialog" aria-labelledby="edit-source-title" aria-describedby="edit-source-description">
+            <DialogHeader className="confirm-dialog-header">
+              <div className="confirm-icon" aria-hidden="true">
+                <FilePenLine size={16} />
+              </div>
+              <div>
+                <DialogTitle id="edit-source-title">Choose local copy to edit</DialogTitle>
+                <DialogDescription id="edit-source-description">
+                  {row.name || row.id} is installed in more than one local skills folder. Pick the copy you want to edit.
+                </DialogDescription>
+              </div>
+            </DialogHeader>
+            <div className="edit-source-options" aria-label="Local copies">
+              {localSourcesForRow(row).map((source) => (
+                <button
+                  className="edit-source-option"
+                  type="button"
+                  key={source}
+                  onClick={() => onChoose(row, source)}
+                  disabled={busyId !== null}
+                >
+                  <span>{sourceLabel(source)}</span>
+                  <code>{localPathForSource(row, source)}</code>
+                </button>
+              ))}
+            </div>
+            <DialogFooter className="confirm-dialog-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
+function CompareVersionsDialog({
+  state,
+  busyId,
+  onClose,
+  onAcceptVersion
+}: {
+  state: { row: SkillRow; versions: SkillVersion[] } | null;
+  busyId: string | null;
+  onClose: () => void;
+  onAcceptVersion: (strategy: ResolveStrategy) => Promise<void>;
+}) {
+  const busy = busyId !== null && state !== null;
+  const row = state?.row ?? null;
+  const versionDisabled = (version: SkillVersion) => !version.exists || busy;
+
+  return (
+    <Dialog
+      open={Boolean(state)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {state ? (
+          <DialogContent className="confirm-dialog compare-dialog" aria-labelledby="compare-versions-title" aria-describedby="compare-versions-description">
+            <DialogHeader className="compare-header">
+              <div className="confirm-icon" aria-hidden="true">
+                <GitCompareArrows size={16} />
+              </div>
+              <div>
+                <DialogTitle id="compare-versions-title">Compare {state.row.name || state.row.id}</DialogTitle>
+                <DialogDescription id="compare-versions-description">Compare local and repo versions from each known source.</DialogDescription>
+              </div>
+            </DialogHeader>
+            <div className="compare-source-grid">
+              {state.versions.map((version) => (
+                <section className="compare-source" key={version.source}>
+                  <div className="compare-source-title">
+                    <strong>{sourceLabel(version.source)}</strong>
+                    <span>{version.exists ? "Available" : "Missing"}</span>
+                  </div>
+                  <p className="compare-source-path">{version.path}</p>
+                  <pre className="compare-source-content">
+                    <code>{version.content ?? "No SKILL.md present in this source."}</code>
+                  </pre>
+                  <div className="compare-source-actions">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={() => void onAcceptVersion(version.source)}
+                      disabled={versionDisabled(version)}
+                      title={
+                        version.exists
+                          ? `Accept ${sourceLabel(version.source)} version for ${state.row.name || state.row.id}`
+                          : `${sourceLabel(version.source)} version is missing`
+                      }
+                    >
+                      {busyId === compareResolveBusyId(state.row, version.source) ? (
+                        <Loader2 className="spin" size={14} aria-hidden="true" />
+                      ) : (
+                        <CheckCircle2 size={14} aria-hidden="true" />
+                      )}
+                      Accept this version
+                    </Button>
+                  </div>
+                </section>
+              ))}
+            </div>
+            <DialogFooter className="compare-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <X size={15} aria-hidden="true" />}
+                Close
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
+function ConfirmActionDialog({
+  action,
+  busyId,
+  onClose,
+  onConfirm
+}: {
+  action: PendingSkillAction | null;
+  busyId: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const busy = action ? busyId === actionBusyId(action.endpoint, action.row) : false;
+  const copy = action ? confirmDialogCopy(action.endpoint, action.row) : null;
+
+  return (
+    <Dialog
+      open={Boolean(action)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {copy ? (
+          <DialogContent className="confirm-dialog" aria-labelledby="confirm-action-title" aria-describedby="confirm-action-description">
+            <DialogHeader className="confirm-dialog-header">
+              <div className="confirm-icon" aria-hidden="true">
+                {copy.icon}
+              </div>
+              <div>
+                <DialogTitle id="confirm-action-title">{copy.title}</DialogTitle>
+                <DialogDescription id="confirm-action-description">{copy.description}</DialogDescription>
+              </div>
+            </DialogHeader>
+            <div className="confirm-scope" aria-label="Action scope">
+              {copy.scope.map((item) => (
+                <div className="confirm-scope-item" key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
+            <DialogFooter className="confirm-dialog-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant={copy.danger ? "destructive" : "primary"} type="button" onClick={onConfirm} disabled={busy}>
+                {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : copy.icon}
+                {copy.confirmLabel}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
+function RestoreArchiveDialog({
+  row,
+  busyId,
+  onClose,
+  onConfirm
+}: {
+  row: ArchiveRow | null;
+  busyId: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const busy = row ? busyId === restoreBusyId(row) : false;
+
+  return (
+    <Dialog
+      open={Boolean(row)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {row ? (
+          <DialogContent
+            className="confirm-dialog"
+            aria-labelledby="restore-archive-title"
+            aria-describedby="restore-archive-description"
+          >
+            <DialogHeader className="confirm-dialog-header">
+              <div className="confirm-icon" aria-hidden="true">
+                <RotateCcw size={16} />
+              </div>
+              <div>
+                <DialogTitle id="restore-archive-title">Restore {row.name || row.id}?</DialogTitle>
+                <DialogDescription id="restore-archive-description">This moves the archived skill copy back into the active skills folder.</DialogDescription>
+              </div>
+            </DialogHeader>
+            <div className="confirm-scope" aria-label="Restore scope">
+              <div className="confirm-scope-item">
+                <span>Archive copy</span>
+                <strong>{row.archivePath}</strong>
+              </div>
+              <div className="confirm-scope-item">
+                <span>Archived at</span>
+                <strong>{formatArchiveDate(row.archivedAt)}</strong>
+              </div>
+            </div>
+            <DialogFooter className="confirm-dialog-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="primary" type="button" onClick={onConfirm} disabled={busy}>
+                {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
+                Restore
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
+function confirmDialogCopy(endpoint: SkillActionEndpoint, row: SkillRow) {
+  const skillName = row.name || row.id;
+  if (endpoint === "archive") {
+    return {
+      title: `Stop syncing ${skillName}?`,
+      description:
+        "This removes the skill from the active sync set. The installed local copy stays available on this machine.",
+      confirmLabel: "Stop syncing",
+      icon: <Archive size={16} aria-hidden="true" />,
+      danger: false,
+      scope: [
+        { label: "Local skill", value: "Kept installed" },
+        { label: "Sync repo", value: "No longer active" },
+        { label: "GitHub", value: "Updated with the archive sync" }
+      ]
+    };
+  }
+
+  const multipleLocalCopies = row.localSources.length > 1;
+  return {
+    title: multipleLocalCopies ? `Remove local copies of ${skillName}?` : `Remove local copy of ${skillName}?`,
+    description: multipleLocalCopies
+      ? "This deletes the skill from both local skill folders on this machine. The synced copy stays in the repository and can be installed again."
+      : "This deletes the skill folder from this machine only. The synced copy stays in the repository and can be installed again.",
+    confirmLabel: multipleLocalCopies ? "Remove local copies" : "Remove local copy",
+    icon: <Trash2 size={16} aria-hidden="true" />,
+    danger: true,
+    scope: [
+      { label: "This machine", value: multipleLocalCopies ? "Delete Codex and Agents copies" : "Delete local folder" },
+      { label: "Sync repo", value: "Leave unchanged" },
+      { label: "Git remote", value: "No archive action" }
+    ]
+  };
 }
 
 function DetailDrawer({
@@ -1499,7 +2387,7 @@ function DetailDrawer({
           <DetailField label="Local copy" value={selected.installed ? "Installed" : "Missing"} />
           <DetailField label="Sync state" value={syncLabel(selected.syncState)} />
           <DetailField label="Last used" value={formatLastUsed(selected.lastUsedAt)} />
-          <DetailField label="Updated" value={formatTimestamp(selected.updatedAt)} />
+          <DetailField label="Local modified" value={formatLocalModified(selected.localModifiedAt)} />
         </div>
 
         <div className="detail-section">
@@ -1510,7 +2398,7 @@ function DetailDrawer({
 
         <div className="detail-section">
           <h3>Hashes</h3>
-          <KeyValue label="Local hash" value={shortHash(selected.localHash)} />
+          <KeyValue label="Local hash" value={localHashLabel(selected)} />
           <KeyValue label="Repo hash" value={shortHash(selected.repoHash)} />
         </div>
       </SheetContent>
@@ -1550,7 +2438,7 @@ function SkillEditorDrawer({
           </div>
           <p>{row.name || row.id}</p>
           <div className="drawer-badges">
-            <span className={`source-badge ${row.source}`}>{sourceLabel(row.source)}</span>
+            <span className={`source-badge ${editorState.source}`}>{sourceLabel(editorState.source)}</span>
             {editorState.dirty ? <span className="dirty-badge">Unsaved</span> : <span className="saved-badge">Saved</span>}
           </div>
         </div>
@@ -1642,14 +2530,109 @@ function syncLabel(state: SkillRow["syncState"] | Filter) {
   return labels[state] ?? state;
 }
 
+function formatAutoSyncLabel(status: AutoSyncStatus) {
+  if (!status.enabled) {
+    return "Auto-sync off";
+  }
+
+  if (status.running) {
+    return "Auto-sync running";
+  }
+
+  if (status.pending) {
+    return `Auto-sync queued (${status.mode})`;
+  }
+
+  if (status.watchersSupported) {
+    return `Auto-sync ${status.mode}`;
+  }
+
+  return "Auto-sync polling";
+}
+
+function statusMessage(status: AutoSyncStatus) {
+  if (!status.lastRunCompletedAt) {
+    return status.enabled ? "Auto-sync idle" : "Auto-sync off";
+  }
+
+  const last = new Date(status.lastRunCompletedAt);
+  if (Number.isNaN(last.getTime())) {
+    return "Auto-sync idle";
+  }
+
+  const now = new Date();
+  const mins = Math.max(0, Math.floor((now.getTime() - last.getTime()) / 60000));
+  return `${mins} min ago`;
+}
+
+function branchSyncLabel(status: GitBranchSyncStatus) {
+  if (status.state === "up-to-date") {
+    return "Remote synced";
+  }
+
+  if (status.state === "ahead") {
+    return `Push pending ${status.ahead}`;
+  }
+
+  if (status.state === "behind") {
+    return `Pull pending ${status.behind}`;
+  }
+
+  if (status.state === "diverged") {
+    return `Diverged +${status.ahead}/-${status.behind}`;
+  }
+
+  if (status.state === "no-upstream") {
+    return "No upstream";
+  }
+
+  return "Remote unknown";
+}
+
+function branchSyncTitle(status: GitBranchSyncStatus) {
+  const target = status.upstream ?? "remote";
+  if (status.state === "up-to-date") {
+    return `Local branch is up to date with ${target}.`;
+  }
+
+  if (status.state === "ahead") {
+    return `${status.ahead} local commit(s) are not on ${target} yet.`;
+  }
+
+  if (status.state === "behind") {
+    return `${target} has ${status.behind} commit(s) not pulled locally.`;
+  }
+
+  if (status.state === "diverged") {
+    return `Local and ${target} both have unique commits. Next push will rebase or report a conflict.`;
+  }
+
+  if (status.state === "no-upstream") {
+    return "No upstream branch is configured for this sync repository.";
+  }
+
+  return "Unable to determine remote branch state.";
+}
+
 function sourceLabel(source: SkillRow["source"]) {
   const labels: Record<SkillRow["source"], string> = {
     codex: "Codex local",
     agents: "Agents local",
+    both: "Codex + Agents",
     repo: "Sync repo"
   };
 
   return labels[source];
+}
+
+function localPathForSource(row: SkillRow, source: LocalSkillSource) {
+  const prefix = `${sourceLabel(source)}: `;
+  const matchingLine = row.localPath?.split("\n").find((line) => line.startsWith(prefix));
+  return matchingLine ? matchingLine.slice(prefix.length) : sourceLabel(source);
+}
+
+function localHashLabel(row: SkillRow) {
+  return row.localCopiesDiffer ? "Mixed local copies" : shortHash(row.localHash);
 }
 
 function kindLabel(kind: SkillRow["kind"]) {
@@ -1677,6 +2660,14 @@ function formatTimestamp(value: string | null) {
   }
 
   return date.toLocaleString();
+}
+
+function formatArchiveDate(value: string | null) {
+  return value ? formatTimestamp(value) : "Unknown";
+}
+
+function formatLocalModified(value: string | null) {
+  return value ? formatTimestamp(value) : "No local copy";
 }
 
 function formatLastUsed(lastUsedAt: string | null) {

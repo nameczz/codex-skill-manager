@@ -10,6 +10,17 @@ export type GitCommandResult = {
   stderr: string;
 };
 
+export type GitBranchSyncStatus = {
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  state: "up-to-date" | "ahead" | "behind" | "diverged" | "no-upstream" | "unknown";
+};
+
+export type GitBranchSyncStatusOptions = {
+  fetch?: boolean;
+};
+
 export async function ensureGitRepository(syncRepo: string): Promise<boolean> {
   if (existsSync(path.join(syncRepo, ".git"))) {
     return false;
@@ -26,6 +37,59 @@ export async function gitStatus(syncRepo: string): Promise<string> {
 
   const { stdout } = await runGit(syncRepo, ["status", "--short"]);
   return stdout.trim();
+}
+
+export async function gitBranchSyncStatus(syncRepo: string, options: GitBranchSyncStatusOptions = {}): Promise<GitBranchSyncStatus> {
+  if (!existsSync(path.join(syncRepo, ".git"))) {
+    return { upstream: null, ahead: 0, behind: 0, state: "unknown" };
+  }
+
+  const branch = await currentBranch(syncRepo);
+  const upstream = await branchUpstream(syncRepo);
+  if (!upstream) {
+    return { upstream: null, ahead: 0, behind: 0, state: "no-upstream" };
+  }
+
+  const remote = remoteFromUpstream(upstream);
+  if (!remote) {
+    return { upstream, ahead: 0, behind: 0, state: "unknown" };
+  }
+
+  try {
+    if (options.fetch) {
+      await runGit(syncRepo, ["fetch", "--prune", remote]);
+    }
+
+    const branchStatus = await runGit(syncRepo, ["rev-list", "--left-right", "--count", `${upstream}...${branch}`]);
+    const [rawBehind, rawAhead] = branchStatus.stdout.trim().split(/\s+/);
+    const behind = Number.parseInt(rawBehind ?? "", 10);
+    const ahead = Number.parseInt(rawAhead ?? "", 10);
+
+    if (!Number.isFinite(ahead) || !Number.isFinite(behind) || Number.isNaN(ahead) || Number.isNaN(behind)) {
+      return { upstream, ahead: 0, behind: 0, state: "unknown" };
+    }
+
+    return {
+      upstream,
+      ahead,
+      behind,
+      state:
+        ahead === 0 && behind === 0
+          ? "up-to-date"
+          : ahead > 0 && behind > 0
+            ? "diverged"
+            : ahead > 0
+              ? "ahead"
+              : "behind"
+    };
+  } catch {
+    return {
+      upstream,
+      ahead: 0,
+      behind: 0,
+      state: "unknown"
+    };
+  }
 }
 
 export async function gitAdd(syncRepo: string, paths: string[]): Promise<void> {
@@ -71,12 +135,30 @@ export async function gitPush(syncRepo: string): Promise<void> {
   const branch = await currentBranch(syncRepo);
   const remote = remotes.includes("origin") ? "origin" : remotes[0];
 
-  if (await hasUpstream(syncRepo)) {
-    await runGit(syncRepo, ["push"]);
-    return;
-  }
+  const shouldUseUpstream = await hasUpstream(syncRepo);
+  const pushArgs = shouldUseUpstream ? ["push"] : ["push", "-u", remote, branch];
 
-  await runGit(syncRepo, ["push", "-u", remote, branch]);
+  try {
+    await runGit(syncRepo, pushArgs);
+    return;
+  } catch (error) {
+    if (!isNonFastForwardPushError(error)) {
+      throw error;
+    }
+
+    await runGit(syncRepo, ["fetch", "--prune", remote]);
+    try {
+      await runGit(syncRepo, ["rebase", `${remote}/${branch}`]);
+    } catch (rebaseError) {
+      await safeAbortRebase(syncRepo);
+      throw new Error(
+        `Cannot push because ${branch} on ${remote} has diverged and remote changes could not be replayed cleanly. ` +
+          `Resolve the conflict and re-run sync.\n${(rebaseError as Error).message}`
+      );
+    }
+
+    await runGit(syncRepo, pushArgs);
+  }
 }
 
 export async function gitPull(syncRepo: string): Promise<void> {
@@ -121,6 +203,25 @@ async function currentBranch(syncRepo: string): Promise<string> {
   return branch;
 }
 
+async function branchUpstream(syncRepo: string): Promise<string | null> {
+  try {
+    const { stdout } = await runGit(syncRepo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+    const upstream = stdout.trim();
+    return upstream || null;
+  } catch (error) {
+    if (isGitExitCode(error, 128)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function remoteFromUpstream(upstream: string): string | null {
+  const slash = upstream.indexOf("/");
+  return slash > 0 ? upstream.substring(0, slash) : null;
+}
+
 export async function hasUpstream(syncRepo: string): Promise<boolean> {
   try {
     await runGit(syncRepo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
@@ -130,6 +231,19 @@ export async function hasUpstream(syncRepo: string): Promise<boolean> {
       return false;
     }
     throw error;
+  }
+}
+
+function isNonFastForwardPushError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return message.includes("non-fast-forward") || message.includes("fetch first") || message.includes("not a fast-forward");
+}
+
+async function safeAbortRebase(syncRepo: string): Promise<void> {
+  try {
+    await runGit(syncRepo, ["rebase", "--abort"]);
+  } catch {
+    // ignore any best-effort failure from aborting a non-rebase state
   }
 }
 

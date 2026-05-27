@@ -1,13 +1,14 @@
-import type { LocalConfig, LocalSkillSource, SkillRecord } from "./types.js";
+import type { LocalConfig, LocalSkillSource } from "./types.js";
 import { installRepoSkill } from "./installSkill.js";
 import { buildStatusReport } from "./status.js";
 import { validateSkillId } from "./paths.js";
+import type { InstallRepoSkillResult } from "./types.js";
 
 export type UpdateLocalOptions = {
   source?: LocalSkillSource;
 };
 
-export async function updateLocalSkill(config: LocalConfig, skillId: string, options: UpdateLocalOptions = {}): Promise<SkillRecord> {
+export async function updateLocalSkill(config: LocalConfig, skillId: string, options: UpdateLocalOptions = {}): Promise<InstallRepoSkillResult> {
   const id = validateSkillId(skillId);
   const report = await buildStatusReport(config);
   const target = report.managed.find((skill) => skill.id === id);

@@ -1,5 +1,9 @@
-import type { LocalConfig, ScannedSkill, SkillRecord, StatusReport, SyncState } from "./types.js";
-import { repoSkillsDir } from "./paths.js";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import type { ArchiveCopyStatus, LocalConfig, ScannedSkill, SkillRecord, StatusReport, SyncState } from "./types.js";
+import { hashDirectory } from "./hash.js";
+import { readSkillFrontmatter } from "./frontmatter.js";
+import { repoArchiveDir, repoSkillsDir } from "./paths.js";
 import { readSkillsMetadata } from "./metadata.js";
 import { scanSkills } from "./scanner.js";
 import { getLastUsageBySkill } from "./usage.js";
@@ -15,8 +19,15 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
   const repoById = new Map(repoSkills.map((skill) => [skill.id, skill]));
   const managedIds = new Set(managedRecords.map((skill) => skill.id));
   const lastUsedBySkill = await getLastUsageBySkill(config.syncRepo, managedRecords.map((skill) => skill.id));
+  const archivedRecords = metadata.skills.filter((skill) => skill.status === "archived");
+  const archived = (await Promise.all(archivedRecords.map((record) => enrichArchivedRecord(config.syncRepo, record)))).sort((a, b) =>
+    a.id.localeCompare(b.id)
+  );
 
-  const managed = managedRecords.map((record) => refreshRecord(record, findLocalSkill(record, localById), repoById.get(record.id), lastUsedBySkill.get(record.id) ?? null));
+  const managed = managedRecords.map((record) => {
+    const localCandidates = localById.get(record.id) ?? [];
+    return refreshRecord(record, findLocalSkill(record, localById), localCandidates, repoById.get(record.id), lastUsedBySkill.get(record.id) ?? null);
+  });
   const unmanagedLocal = localSkills.filter((skill) => !managedIds.has(skill.id));
   const repoOnly = repoSkills.filter((skill) => !managedIds.has(skill.id));
 
@@ -26,7 +37,8 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
     agentsSkillsDir: config.agentsSkillsDir,
     managed,
     unmanagedLocal,
-    repoOnly
+    repoOnly,
+    archived
   };
 }
 
@@ -37,12 +49,18 @@ function compareScannedSkills(a: ScannedSkill, b: ScannedSkill): number {
 function refreshRecord(
   record: SkillRecord,
   local: ScannedSkill | undefined,
+  localCandidates: ScannedSkill[],
   repo: ScannedSkill | undefined,
   lastUsedAt: string | null
 ): SkillRecord {
-  const currentLocalHash = local?.hash ?? null;
+  const currentLocalHash = currentLocalHashForCandidates(local, localCandidates);
   const currentRepoHash = repo?.hash ?? null;
-  const installed = Boolean(local);
+  const installed = localCandidates.length > 0;
+  const localSources = localCandidates
+    .map((candidate) => candidate.source)
+    .filter((source): source is "codex" | "agents" => source === "codex" || source === "agents")
+    .sort((a, b) => a.localeCompare(b));
+  const localCopiesDiffer = localCandidateHashes(localCandidates).length > 1;
 
   return {
     ...record,
@@ -50,11 +68,37 @@ function refreshRecord(
     name: repo?.name ?? local?.name ?? record.name,
     description: repo?.description ?? local?.description ?? record.description,
     localSource: local?.source === "codex" || local?.source === "agents" ? local.source : record.localSource ?? null,
+    localSources,
+    localCopiesDiffer,
+    localModifiedAt: latestLocalModifiedAt(localCandidates),
     installed,
-    syncState: deriveSyncState(record.lastSyncedHash, currentLocalHash, currentRepoHash),
+    syncState: localCopiesDiffer ? "conflict" : deriveSyncState(record.lastSyncedHash, currentLocalHash, currentRepoHash),
     currentLocalHash,
     currentRepoHash
   };
+}
+
+function currentLocalHashForCandidates(local: ScannedSkill | undefined, localCandidates: ScannedSkill[]): string | null {
+  const hashes = localCandidateHashes(localCandidates);
+  if (hashes.length === 1) {
+    return hashes[0] ?? null;
+  }
+
+  return local?.hash ?? null;
+}
+
+function localCandidateHashes(localCandidates: ScannedSkill[]): string[] {
+  return [...new Set(localCandidates.map((candidate) => candidate.hash))].sort();
+}
+
+function latestLocalModifiedAt(localCandidates: ScannedSkill[]): string | null {
+  if (localCandidates.length === 0) {
+    return null;
+  }
+
+  return localCandidates
+    .map((skill) => skill.modifiedAt)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
 }
 
 function groupLocalSkills(skills: ScannedSkill[]): Map<string, ScannedSkill[]> {
@@ -120,4 +164,49 @@ export function deriveSyncState(
   }
 
   return "clean";
+}
+
+async function enrichArchivedRecord(syncRepo: string, record: SkillRecord): Promise<SkillRecord> {
+  const archivePath = path.join(repoArchiveDir(syncRepo), record.id);
+  const skillFilePath = path.join(archivePath, "SKILL.md");
+
+  if (!existsSync(archivePath) || !existsSync(skillFilePath)) {
+    return {
+      ...record,
+      archivePath,
+      archiveCopyStatus: "missing" as ArchiveCopyStatus,
+      archiveHash: null,
+      currentRepoHash: null,
+      status: "archived",
+      syncState: "missing_local"
+    };
+  }
+
+  const archiveFrontmatter = await readSkillFrontmatter(archivePath);
+  const archiveHash = await safeHash(archivePath);
+
+  return {
+    ...record,
+    status: "archived",
+    name: archiveFrontmatter.name || record.name,
+    description: archiveFrontmatter.description || record.description,
+    archivePath,
+    archiveCopyStatus: "present" as ArchiveCopyStatus,
+    archiveHash,
+    currentRepoHash: archiveHash,
+    syncState: "missing_local",
+    installed: record.installed ?? false,
+    localSources: [],
+    localCopiesDiffer: false,
+    localModifiedAt: record.localModifiedAt ?? null,
+    currentLocalHash: record.currentLocalHash ?? null
+  };
+}
+
+async function safeHash(skillDirectory: string): Promise<string | null> {
+  try {
+    return await hashDirectory(skillDirectory);
+  } catch {
+    return null;
+  }
 }

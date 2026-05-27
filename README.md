@@ -43,12 +43,16 @@ Skills are managed by top-level folders under the configured Codex and Agents sk
 ## Sync Workflow
 
 - `Pull` runs a fast-forward-only Git pull and refuses to run while the sync repo has local uncommitted changes.
-- `Sync selected` commits and pushes selected local skill changes to the sync repository remote.
-- `Sync repo changes` appears when repository metadata, archive, or usage records changed without selected skills.
+- `Auto-sync local modifications` continuously commits and pushes tracked local changes to the sync repo once they stabilize.
+- `Add to sync` imports unmanaged local skills, then commits/pushes repo metadata and `SKILL.md` for those skills.
 - `Install local` restores a missing local skill from the sync repo.
 - `Update local` applies a repo-changed skill to this machine and blocks conflicts.
-- `Archive repo` moves the repo copy under `archive/` and marks metadata as archived. It does not delete the local copy.
+- `Resolve conflict` chooses one source (`Codex`, `Agents`, or repo), applies it as truth, updates metadata, and syncs that repo change.
+- `Compare versions` shows snapshots for the Codex, Agents, and repo copies of a skill.
+- `Stop syncing` moves a managed repo copy to `archive/`, marks it as archived, and stops active tracking. Local copies stay on this machine.
+- `Restore` moves `archive/<skillId>` back to `skills/<skillId>`, re-activates managed status, and syncs that metadata change.
 - `Remove local` deletes the skill copy from this machine only. It does not archive or delete the repo copy.
+- `Archive` view lists archived skills and supports restoring from the Web UI.
 - `record <skill-id>` writes a privacy-limited usage event containing only `skillId`, `invokedAt`, and `source`.
 
 ## Usage Tracking

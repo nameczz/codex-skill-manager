@@ -30,5 +30,14 @@ export function formatStatus(report: StatusReport): string {
     lines.push(`  ... ${report.repoOnly.length - 20} more`);
   }
 
+  lines.push(`Archived skills: ${report.archived.length}`);
+  for (const skill of report.archived.slice(0, 20)) {
+    lines.push(`  - ${skill.id} [${skill.archiveCopyStatus ?? "missing copy"}]`);
+  }
+
+  if (report.archived.length > 20) {
+    lines.push(`  ... ${report.archived.length - 20} more`);
+  }
+
   return lines.join("\n");
 }
