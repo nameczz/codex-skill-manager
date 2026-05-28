@@ -63,6 +63,16 @@ export type UsageEvent = {
   source: "record";
 };
 
+export type UsageMonitorStatus = {
+  enabled: boolean;
+  running: boolean;
+  intervalMs: number;
+  lastScanStartedAt: string | null;
+  lastScanCompletedAt: string | null;
+  lastRecordedSkillIds: string[];
+  lastError: string | null;
+};
+
 export type DependencyInstallStatus = "skipped-no-package-json" | "skipped-existing-node-modules" | "installed" | "failed";
 
 export type PackageManager = "npm" | "yarn" | "pnpm" | "bun";
@@ -79,16 +89,6 @@ export type InstallRepoSkillResult = {
   dependencyInstall: DependencyInstallResult;
 };
 
-export type UsageHookStatus = {
-  hooksPath: string;
-  installed: boolean;
-  needsUpdate: boolean;
-  installable: boolean;
-  reason: string | null;
-  command: string;
-  installedCommand: string | null;
-};
-
 export type ScannedSkill = {
   id: string;
   name: string;
@@ -97,6 +97,7 @@ export type ScannedSkill = {
   source: ScanSource;
   hash: string;
   modifiedAt: string;
+  lastUsedAt?: string | null;
 };
 
 export type StatusReport = {

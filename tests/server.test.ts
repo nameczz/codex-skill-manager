@@ -671,43 +671,6 @@ describe("server", () => {
     }
   });
 
-  it("installs and removes the Codex usage hook through the API", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "csm-server-hook-"));
-    process.env.CSM_CONFIG_DIR = path.join(root, "config");
-    process.env.CODEX_HOME = path.join(root, "codex-home");
-    process.env.CSM_HOOK_COMMAND = "node /tmp/skill-manager.js record-hook";
-
-    const server = await startServer({ port: 0 });
-    try {
-      const config = {
-        syncRepo: path.join(root, "repo"),
-        codexSkillsDir: path.join(root, "codex-skills"),
-        agentsSkillsDir: path.join(root, "agents-skills"),
-        cacheDir: path.join(root, "cache")
-      };
-      await fetch(`${server.url}/api/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config)
-      });
-
-      const installResponse = await fetch(`${server.url}/api/codex-hook`, { method: "POST" });
-      const installPayload = (await installResponse.json()) as { usageHook: { installed: boolean; hooksPath: string } };
-
-      expect(installResponse.ok).toBe(true);
-      expect(installPayload.usageHook.installed).toBe(true);
-      await expect(readFile(installPayload.usageHook.hooksPath, "utf8")).resolves.toContain("record-hook");
-
-      const removeResponse = await fetch(`${server.url}/api/codex-hook`, { method: "DELETE" });
-      const removePayload = (await removeResponse.json()) as { usageHook: { installed: boolean } };
-
-      expect(removeResponse.ok).toBe(true);
-      expect(removePayload.usageHook.installed).toBe(false);
-    } finally {
-      await server.close();
-    }
-  });
-
   it("installs a managed skill with dependencies during /api/install", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "csm-server-install-deps-"));
     process.env.CSM_CONFIG_DIR = path.join(root, "config");

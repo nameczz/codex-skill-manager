@@ -18,7 +18,8 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
   const localById = groupLocalSkills(localSkills);
   const repoById = new Map(repoSkills.map((skill) => [skill.id, skill]));
   const managedIds = new Set(managedRecords.map((skill) => skill.id));
-  const lastUsedBySkill = await getLastUsageBySkill(config.syncRepo, managedRecords.map((skill) => skill.id));
+  const allSkillIds = uniqueSkillIds([...managedRecords, ...localSkills, ...repoSkills].map((skill) => skill.id));
+  const lastUsedBySkill = await getLastUsageBySkill(config.syncRepo, allSkillIds);
   const archivedRecords = metadata.skills.filter((skill) => skill.status === "archived");
   const archived = (await Promise.all(archivedRecords.map((record) => enrichArchivedRecord(config.syncRepo, record)))).sort((a, b) =>
     a.id.localeCompare(b.id)
@@ -28,8 +29,14 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
     const localCandidates = localById.get(record.id) ?? [];
     return refreshRecord(record, findLocalSkill(record, localById), localCandidates, repoById.get(record.id), lastUsedBySkill.get(record.id) ?? null);
   });
-  const unmanagedLocal = localSkills.filter((skill) => !managedIds.has(skill.id));
-  const repoOnly = repoSkills.filter((skill) => !managedIds.has(skill.id));
+  const unmanagedLocal = withLastUsedAt(
+    localSkills.filter((skill) => !managedIds.has(skill.id)),
+    lastUsedBySkill
+  );
+  const repoOnly = withLastUsedAt(
+    repoSkills.filter((skill) => !managedIds.has(skill.id)),
+    lastUsedBySkill
+  );
 
   return {
     syncRepo: config.syncRepo,
@@ -40,6 +47,17 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
     repoOnly,
     archived
   };
+}
+
+function uniqueSkillIds(skillIds: string[]): string[] {
+  return [...new Set(skillIds)].sort((a, b) => a.localeCompare(b));
+}
+
+function withLastUsedAt(skills: ScannedSkill[], lastUsedBySkill: Map<string, string | null>): ScannedSkill[] {
+  return skills.map((skill) => ({
+    ...skill,
+    lastUsedAt: lastUsedBySkill.get(skill.id) ?? null
+  }));
 }
 
 function compareScannedSkills(a: ScannedSkill, b: ScannedSkill): number {

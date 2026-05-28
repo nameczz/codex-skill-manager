@@ -2,7 +2,7 @@
 
 Local CLI and Web UI for managing Codex skills across computers with a Git-backed sync repository.
 
-Current scope includes local setup, skill scanning, editable Web UI, Git-backed sync, pull/update flows, archive/remove-local actions, explicit usage recording, and an optional Codex prompt hook for usage timestamps.
+Current scope includes local setup, skill scanning, editable Web UI, Git-backed sync, pull/update flows, archive/remove-local actions, explicit usage recording, and local Codex session tool-trace scanning for usage timestamps.
 
 ## Commands
 
@@ -15,8 +15,6 @@ node dist/src/cli.js pull
 node dist/src/cli.js sync [skill-id...]
 node dist/src/cli.js update-local <skill-id>
 node dist/src/cli.js record <skill-id>
-node dist/src/cli.js install-codex-hook
-node dist/src/cli.js hook-status
 node dist/src/cli.js serve
 ```
 
@@ -57,17 +55,12 @@ Skills are managed by top-level folders under the configured Codex and Agents sk
 
 ## Usage Tracking
 
-`record <skill-id>` is the explicit path for confirming a skill was used.
+Skill Manager records usage in two ways:
 
-The optional Codex hook installs one `UserPromptSubmit` command into `~/.codex/hooks.json`. It parses the submitted prompt for explicit `SKILL.md` links or paths under the configured Codex and Agents skill directories, then records only the matched `skillId` and timestamp. It does not read transcripts, project paths, hostnames, session ids, or tool output.
+- `record <skill-id>` is the explicit path for confirming a skill was used.
+- The Web UI scans local Codex session tool traces during refresh and records concrete `.../SKILL.md` reads from tool calls. Plain user mentions such as `$baoyu-comic` do not count as usage.
 
-Install it from Settings in the Web UI, or run:
-
-```bash
-node dist/src/cli.js install-codex-hook
-```
-
-Codex may ask you to review and trust the hook before it runs. If you are developing from source, build first so the hook can call the compiled CLI.
+The scanner stores only `skillId`, `invokedAt`, and `source`. It keeps scan cursor state in the local cache and does not copy prompt text into the sync repository.
 
 ## Default Paths
 
@@ -99,4 +92,4 @@ CSM_AGENTS_SKILLS_DIR=/tmp/agents-skills \
 npm run dev -- serve
 ```
 
-Use `CODEX_HOME` or `CSM_CODEX_HOME` to test hook installation without touching the real `~/.codex` directory.
+Use `CODEX_HOME` to test session scanning without touching the real `~/.codex` directory.

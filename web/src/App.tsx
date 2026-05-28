@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Archive,
+  ArrowUpDown,
   Box,
   ChevronLeft,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CheckCircle2,
   CircleAlert,
   Clock3,
@@ -16,6 +19,7 @@ import {
   Layers3,
   GitCompareArrows,
   Loader2,
+  Moon,
   PlusCircle,
   RefreshCw,
   Save,
@@ -23,6 +27,7 @@ import {
   Search,
   Settings,
   ShieldAlert,
+  Sun,
   Trash2,
   X
 } from "lucide-react";
@@ -39,7 +44,7 @@ import type {
   SkillVersionsResponse,
   StatusReport,
   SyncResult,
-  UsageHookStatus
+  UsageMonitorStatus
 } from "./types";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -81,7 +86,22 @@ type SetupPaths = {
   cacheDir: string;
 };
 type SetupPathField = keyof SetupPaths | "setupRoot";
-type View = "skills" | "sync" | "usage" | "settings" | "archive";
+type View = "skills" | "settings" | "archive";
+type Theme = "light" | "dark";
+type SortDirection = "asc" | "desc";
+type SortState<T extends string> = {
+  key: T;
+  direction: SortDirection;
+};
+type SkillSortKey = "name" | "source" | "state" | "local_copy" | "local_modified" | "last_used";
+type ArchiveSortKey = "name" | "archived_at" | "archive_path" | "copy";
+const viewRoutes: Record<View, string> = {
+  skills: "/skills",
+  archive: "/archive",
+  settings: "/settings"
+};
+const themeStorageKey = "csm-theme";
+
 type EditorState = {
   rowKey: string;
   source: LocalSkillSource;
@@ -112,13 +132,15 @@ export function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState<PageSize>(20);
-  const [view, setView] = useState<View>("skills");
+  const [view, setView] = useState<View>(() => viewFromLocation());
   const [checkedRowKeys, setCheckedRowKeys] = useState<string[]>([]);
   const [editorState, setEditorState] = useState<EditorState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingSkillAction | null>(null);
   const [pendingRestore, setPendingRestore] = useState<ArchiveRow | null>(null);
   const [pendingEditRow, setPendingEditRow] = useState<SkillRow | null>(null);
   const [compareState, setCompareState] = useState<{ row: SkillRow; versions: SkillVersion[] } | null>(null);
+  const [skillSort, setSkillSort] = useState<SortState<SkillSortKey>>({ key: "name", direction: "asc" });
+  const [archiveSort, setArchiveSort] = useState<SortState<ArchiveSortKey>>({ key: "name", direction: "asc" });
   const [detailOpen, setDetailOpen] = useState(false);
   const [setupRoot, setSetupRoot] = useState("");
   const [setupPaths, setSetupPaths] = useState<SetupPaths>({
@@ -133,6 +155,23 @@ export function App() {
   const [selectingPath, setSelectingPath] = useState<SetupPathField | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [theme, setTheme] = useState<Theme>(() => readInitialTheme());
+
+  const navigateView = useCallback((nextView: View, options: { replace?: boolean } = {}) => {
+    setView(nextView);
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const nextPath = viewRoutes[nextView];
+    if (normalizeRoutePath(window.location.pathname) === nextPath) {
+      return;
+    }
+
+    const update = options.replace ? window.history.replaceState.bind(window.history) : window.history.pushState.bind(window.history);
+    update(null, "", nextPath);
+  }, []);
 
   async function refresh(options: { silent?: boolean } = {}) {
     if (!options.silent) {
@@ -157,6 +196,27 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.theme = theme;
+    }
+
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(themeStorageKey, theme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    navigateView(viewFromLocation(), { replace: true });
+
+    function handlePopState() {
+      setView(viewFromLocation());
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [navigateView]);
+
+  useEffect(() => {
     if (status?.configured === false) {
       const defaultRoot = status.defaults.syncRepo;
       setSetupRoot((current) => current || defaultRoot);
@@ -175,6 +235,12 @@ export function App() {
       });
     }
   }, [status]);
+
+  useEffect(() => {
+    if (status?.configured === false && view !== "skills") {
+      navigateView("skills", { replace: true });
+    }
+  }, [navigateView, status?.configured, view]);
 
   const rows = useMemo(() => {
     if (!status?.configured) {
@@ -206,8 +272,8 @@ export function App() {
         row.description.toLowerCase().includes(normalized);
       const matchesFilter = filter === "all" || row.syncState === filter;
       return matchesQuery && matchesFilter;
-    });
-  }, [filter, query, rows]);
+    }).sort((a, b) => compareSkillRows(a, b, skillSort));
+  }, [filter, query, rows, skillSort]);
 
   const filteredArchiveRows = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -218,8 +284,8 @@ export function App() {
         row.name.toLowerCase().includes(normalized) ||
         row.description.toLowerCase().includes(normalized);
       return matchesQuery;
-    });
-  }, [archiveRows, query]);
+    }).sort((a, b) => compareArchiveRows(a, b, archiveSort));
+  }, [archiveRows, archiveSort, query]);
 
   const skillPageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const archivePageCount = Math.max(1, Math.ceil(filteredArchiveRows.length / pageSize));
@@ -253,10 +319,6 @@ export function App() {
   const localChangeRows = rows.filter((row) => row.syncState === "local_modified" || row.syncState === "missing_repo");
   const conflictRows = rows.filter((row) => row.syncState === "conflict");
   const unmanagedRows = rows.filter((row) => row.kind === "unmanaged");
-  const usageRows = useMemo(() => rows.filter((row) => row.installed).sort(compareUsageRows), [rows]);
-  const usedRows = usageRows.filter((row) => row.lastUsedAt !== null);
-  const neverUsedRows = usageRows.filter((row) => row.lastUsedAt === null);
-  const staleUsageRows = usageRows.filter(isStaleUsageRow);
   const visibleRowsSelected = activeView === "skills" && pageRows.length > 0 && pageRows.every((row) => checkedRowKeys.includes(rowKey(row)));
   const someVisibleRowsSelected = activeView === "skills" && pageRows.some((row) => checkedRowKeys.includes(rowKey(row)));
   const cleanCount = rows.filter((row) => row.syncState === "clean").length;
@@ -284,7 +346,7 @@ export function App() {
 
   useEffect(() => {
     setPageIndex(0);
-  }, [filter, pageSize, query]);
+  }, [archiveSort, filter, pageSize, query, skillSort]);
 
   useEffect(() => {
     setPageIndex((current) => Math.min(current, pageCount - 1));
@@ -609,50 +671,6 @@ export function App() {
     }
   }
 
-  async function installCodexHook() {
-    setError(null);
-    setNotice(null);
-    setBusyId("hook-install");
-    try {
-      const response = await fetch("/api/codex-hook", {
-        method: "POST"
-      });
-      if (!response.ok) {
-        throw new Error(await readError(response));
-      }
-
-      const payload = (await response.json()) as { usageHook: UsageHookStatus };
-      setStatus((current) => (current?.configured ? { ...current, usageHook: payload.usageHook } : current));
-      setNotice(payload.usageHook.needsUpdate ? "Codex usage hook needs another install attempt." : "Codex usage hook installed.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to install Codex hook.");
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function removeCodexHook() {
-    setError(null);
-    setNotice(null);
-    setBusyId("hook-remove");
-    try {
-      const response = await fetch("/api/codex-hook", {
-        method: "DELETE"
-      });
-      if (!response.ok) {
-        throw new Error(await readError(response));
-      }
-
-      const payload = (await response.json()) as { usageHook: UsageHookStatus };
-      setStatus((current) => (current?.configured ? { ...current, usageHook: payload.usageHook } : current));
-      setNotice("Codex usage hook removed.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to remove Codex hook.");
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   function toggleRowChecked(row: SkillRow, checked: boolean) {
     const key = rowKey(row);
     setCheckedRowKeys((current) => {
@@ -817,8 +835,16 @@ export function App() {
     });
   }
 
+  function updateSkillSort(key: SkillSortKey) {
+    setSkillSort((current) => nextSortState(current, key));
+  }
+
+  function updateArchiveSort(key: ArchiveSortKey) {
+    setArchiveSort((current) => nextSortState(current, key));
+  }
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand">
           <div className="brand-mark">
@@ -836,40 +862,10 @@ export function App() {
             variant="outline"
             size="sm"
             type="button"
-            onClick={() => setView("skills")}
+            onClick={() => navigateView("skills")}
           >
             <Box size={16} aria-hidden="true" />
             Skills
-          </Button>
-          <Button
-            className={configured && activeView === "sync" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
-            variant="outline"
-            size="sm"
-            type="button"
-            onClick={() => {
-              if (configured) {
-                setView("sync");
-              }
-            }}
-            disabled={!configured}
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-            Sync
-          </Button>
-          <Button
-            className={configured && activeView === "usage" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
-            variant="outline"
-            size="sm"
-            type="button"
-            onClick={() => {
-              if (configured) {
-                setView("usage");
-              }
-            }}
-            disabled={!configured}
-          >
-            <Clock3 size={16} aria-hidden="true" />
-            Usage
           </Button>
           <Button
             className={configured && activeView === "archive" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
@@ -878,7 +874,7 @@ export function App() {
             type="button"
             onClick={() => {
               if (configured) {
-                setView("archive");
+                navigateView("archive");
               }
             }}
             disabled={!configured}
@@ -893,7 +889,7 @@ export function App() {
             type="button"
             onClick={() => {
               if (configured) {
-                setView("settings");
+                navigateView("settings");
               }
             }}
             disabled={!configured}
@@ -912,6 +908,18 @@ export function App() {
             <h1>{viewTitle(activeView)}</h1>
           </div>
           <div className="topbar-actions">
+            <Button
+              className="theme-toggle"
+              variant="secondary"
+              size="sm"
+              type="button"
+              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? <Sun size={15} aria-hidden="true" /> : <Moon size={15} aria-hidden="true" />}
+              {theme === "dark" ? "Light" : "Dark"}
+            </Button>
             <Button variant="secondary" size="sm" type="button" onClick={() => void refresh()}>
               <RefreshCw size={15} aria-hidden="true" />
               Refresh
@@ -921,7 +929,7 @@ export function App() {
               size="sm"
               type="button"
               onClick={() => void pullFromRemote()}
-              disabled={!configured || (activeView !== "skills" && activeView !== "sync") || busyId !== null}
+              disabled={!configured || activeView !== "skills" || busyId !== null}
             >
               {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
               Pull
@@ -1034,56 +1042,11 @@ export function App() {
         {configured && activeView === "settings" ? (
           <SettingsPanel
             paths={setupPaths}
-            usageHook={status.usageHook}
             busyId={busyId}
             selectingPath={selectingPath}
             onPathChange={(field, value) => setSetupPaths((current) => ({ ...current, [field]: value }))}
             onChoose={(field, title) => void chooseDirectory(field, title)}
             onSave={() => void saveSettings()}
-            onInstallHook={() => void installCodexHook()}
-            onRemoveHook={() => void removeCodexHook()}
-          />
-        ) : null}
-
-        {configured && activeView === "sync" ? (
-          <SyncPanel
-            report={report}
-            branchStatus={status.gitBranchStatus}
-            autoSyncStatus={status.autoSync}
-            gitStatus={status.gitStatus}
-            cleanCount={cleanCount}
-            reviewCount={reviewCount}
-            localChangeCount={localChangeRows.length}
-            unmanagedCount={unmanagedRows.length}
-            conflictCount={conflictRows.length}
-            repoInstallCount={repoInstallRows.length}
-            repoUpdateCount={repoUpdateRows.length}
-            repoApplyCount={repoApplyCount}
-            busyId={busyId}
-            onPull={() => void pullFromRemote()}
-            onApplyRepoChanges={() => void applyRepoChangesToLocal()}
-            onShowSkills={(nextFilter) => {
-              setFilter(nextFilter);
-              setView("skills");
-            }}
-            onSettings={() => setView("settings")}
-          />
-        ) : null}
-
-        {configured && activeView === "usage" ? (
-          <UsagePanel
-            usageHook={status.usageHook}
-            rows={usageRows}
-            usedCount={usedRows.length}
-            neverUsedCount={neverUsedRows.length}
-            staleCount={staleUsageRows.length}
-            busyId={busyId}
-            onInstallHook={() => void installCodexHook()}
-            onRemoveHook={() => void removeCodexHook()}
-            onSelectRow={(row) => {
-              setSelectedRowKey(rowKey(row));
-              setDetailOpen(true);
-            }}
           />
         ) : null}
 
@@ -1117,12 +1080,41 @@ export function App() {
                     {busyId === "apply-repo" ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <Download size={14} aria-hidden="true" />}
                     Apply repo changes{repoApplyCount > 0 ? ` (${repoApplyCount})` : ""}
                   </Button>
-                  <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => setView("settings")}>
+                  <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => navigateView("settings")}>
                     <Settings size={14} aria-hidden="true" />
                     Change paths
                   </Button>
                 </div>
               </div>
+            </section>
+
+            <section className="skills-summary-strip" aria-label="Sync and usage summary">
+              <SummaryAction
+                icon={<Download size={15} aria-hidden="true" />}
+                label="Repo changes"
+                value={String(repoApplyCount)}
+                detail={`${repoInstallRows.length} install, ${repoUpdateRows.length} update`}
+                disabled={repoApplyCount === 0}
+                onClick={() => setFilter(repoInstallRows.length > 0 ? "missing_local" : "repo_modified")}
+              />
+              <SummaryAction
+                icon={<RefreshCw size={15} aria-hidden="true" />}
+                label="Local changes"
+                value={String(localChangeRows.length + unmanagedRows.length)}
+                detail={`${localChangeRows.length} tracked, ${unmanagedRows.length} local only`}
+                disabled={localChangeRows.length + unmanagedRows.length === 0}
+                onClick={() => setFilter(localChangeRows.length > 0 ? "local_modified" : "unmanaged")}
+              />
+              <SummaryAction
+                icon={<ShieldAlert size={15} aria-hidden="true" />}
+                label="Conflicts"
+                value={String(conflictRows.length)}
+                detail="Compare and accept a copy"
+                tone={conflictRows.length > 0 ? "risk" : "neutral"}
+                disabled={conflictRows.length === 0}
+                onClick={() => setFilter("conflict")}
+              />
+              <UsageTraceStatus status={status.usageMonitor} />
             </section>
 
             <section className="toolbar" aria-label="Skill filters">
@@ -1204,11 +1196,12 @@ export function App() {
                       onChange={toggleVisibleRows}
                     />
                   </span>
-                  <span>Name</span>
-                  <span>Source</span>
-                  <span>State</span>
-                  <span>Local copy</span>
-                  <span>Last used</span>
+                  <SortableHeader label="Name" sortKey="name" sort={skillSort} onSort={updateSkillSort} />
+                  <SortableHeader label="Source" sortKey="source" sort={skillSort} onSort={updateSkillSort} />
+                  <SortableHeader label="State" sortKey="state" sort={skillSort} onSort={updateSkillSort} />
+                  <SortableHeader label="Local copy" sortKey="local_copy" sort={skillSort} onSort={updateSkillSort} />
+                  <SortableHeader label="Local modified" sortKey="local_modified" sort={skillSort} onSort={updateSkillSort} />
+                  <SortableHeader label="Last used" sortKey="last_used" sort={skillSort} onSort={updateSkillSort} />
                   <span>Action</span>
                 </div>
 
@@ -1258,7 +1251,8 @@ export function App() {
                       <span className={row.installed ? "install-state installed" : "install-state"}>
                         {row.installed ? "Installed" : "Missing"}
                       </span>
-                      <span>{formatLastUsed(row.lastUsedAt)}</span>
+                      <span className="skill-time">{formatLocalModified(row.localModifiedAt)}</span>
+                      <span className="skill-time">{formatLastUsed(row.lastUsedAt)}</span>
                       <RowAction
                         row={row}
                         busyId={busyId}
@@ -1361,10 +1355,10 @@ export function App() {
             <section className="skill-list" aria-label="Archived skills">
               <div className="skill-table-scroll">
                 <div className="table-head archive-table-head" role="row">
-                  <span>Name</span>
-                  <span>Archived at</span>
-                  <span>Archive path</span>
-                  <span>Copy</span>
+                  <SortableHeader label="Name" sortKey="name" sort={archiveSort} onSort={updateArchiveSort} />
+                  <SortableHeader label="Archived at" sortKey="archived_at" sort={archiveSort} onSort={updateArchiveSort} />
+                  <SortableHeader label="Archive path" sortKey="archive_path" sort={archiveSort} onSort={updateArchiveSort} />
+                  <SortableHeader label="Copy" sortKey="copy" sort={archiveSort} onSort={updateArchiveSort} />
                   <span>Action</span>
                 </div>
 
@@ -1504,389 +1498,97 @@ export function App() {
 
 function SettingsPanel({
   paths,
-  usageHook,
   busyId,
   selectingPath,
   onPathChange,
   onChoose,
-  onSave,
-  onInstallHook,
-  onRemoveHook
+  onSave
 }: {
   paths: SetupPaths;
-  usageHook: UsageHookStatus;
   busyId: string | null;
   selectingPath: SetupPathField | null;
   onPathChange: (field: keyof SetupPaths, value: string) => void;
   onChoose: (field: keyof SetupPaths, title: string) => void;
   onSave: () => void;
-  onInstallHook: () => void;
-  onRemoveHook: () => void;
 }) {
   const saving = busyId === "save-config";
-  const installingHook = busyId === "hook-install";
-  const removingHook = busyId === "hook-remove";
 
   return (
-    <div className="settings-stack">
-      <Card className="settings-panel" aria-labelledby="settings-title">
-        <CardHeader className="settings-head">
-          <div>
-            <p className="eyebrow">Local configuration</p>
-            <CardTitle id="settings-title">Paths</CardTitle>
-          </div>
-          <Button variant="primary" type="button" onClick={onSave} disabled={saving}>
-            {saving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <FolderGit2 size={15} aria-hidden="true" />}
-            Save paths
-          </Button>
-        </CardHeader>
-
-        <CardContent className="settings-paths">
-          <PathSetting
-            title="Git sync repository"
-            body="Tracked by Git. Skills, metadata, and future sync commits live here."
-            input={
-              <PathInput
-                id="settings-sync-repo-path"
-                label="Path"
-                value={paths.syncRepo}
-                onChange={(value) => onPathChange("syncRepo", value)}
-                onChoose={() => onChoose("syncRepo", "Choose a sync repository directory")}
-                choosing={selectingPath === "syncRepo"}
-              />
-            }
-          />
-          <details className="advanced-settings">
-            <summary>Advanced local paths</summary>
-            <div className="advanced-settings-body">
-              <PathSetting
-                title="Codex skills directory"
-                body="Local Codex skills on this machine. Usually ~/.codex/skills."
-                input={
-                  <PathInput
-                    id="settings-codex-skills-path"
-                    label="Path"
-                    value={paths.codexSkillsDir}
-                    onChange={(value) => onPathChange("codexSkillsDir", value)}
-                    onChoose={() => onChoose("codexSkillsDir", "Choose a Codex skills directory")}
-                    choosing={selectingPath === "codexSkillsDir"}
-                  />
-                }
-              />
-              <PathSetting
-                title="Agents skills directory"
-                body="Local skills used by the agents skill system. Usually ~/.agents/skills."
-                input={
-                  <PathInput
-                    id="settings-agents-skills-path"
-                    label="Path"
-                    value={paths.agentsSkillsDir}
-                    onChange={(value) => onPathChange("agentsSkillsDir", value)}
-                    onChoose={() => onChoose("agentsSkillsDir", "Choose an Agents skills directory")}
-                    choosing={selectingPath === "agentsSkillsDir"}
-                  />
-                }
-              />
-              <PathSetting
-                title="Local cache directory"
-                body="Local-only app state. Defaults to ~/.codex-skill-manager/cache and is never meant for Git sync."
-                input={
-                  <PathInput
-                    id="settings-cache-path"
-                    label="Path"
-                    value={paths.cacheDir}
-                    onChange={(value) => onPathChange("cacheDir", value)}
-                    onChoose={() => onChoose("cacheDir", "Choose a local cache directory")}
-                    choosing={selectingPath === "cacheDir"}
-                  />
-                }
-              />
-            </div>
-          </details>
-        </CardContent>
-      </Card>
-
-      <Card className="settings-panel" aria-labelledby="usage-hook-title">
-        <CardHeader className="settings-head">
-          <div>
-            <p className="eyebrow">Usage tracking</p>
-            <CardTitle id="usage-hook-title">Codex hook</CardTitle>
-          </div>
-          <div className="settings-actions">
-            <Button
-              variant="primary"
-              type="button"
-              onClick={onInstallHook}
-              disabled={installingHook || removingHook || !usageHook.installable}
-            >
-              {installingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Clock3 size={15} aria-hidden="true" />}
-              {usageHook.installed ? (usageHook.needsUpdate ? "Update hook" : "Reinstall hook") : "Install hook"}
-            </Button>
-            <Button
-              variant="secondary"
-              type="button"
-              onClick={onRemoveHook}
-              disabled={installingHook || removingHook || !usageHook.installed}
-            >
-              {removingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
-              Remove
-            </Button>
-          </div>
-        </CardHeader>
-
-        <CardContent className="settings-paths">
-          <div className="hook-summary">
-            <Badge variant={usageHook.installed && !usageHook.needsUpdate ? "success" : "warning"}>
-              {usageHook.installed ? (usageHook.needsUpdate ? "Update available" : "Installed") : "Not installed"}
-            </Badge>
-            <p>
-              Records explicit skill file mentions from Codex prompts through a UserPromptSubmit hook. It writes only the
-              skill id and timestamp to the sync repository usage log.
-            </p>
-          </div>
-          {usageHook.reason ? <p className="hook-warning">{usageHook.reason}</p> : null}
-          <PathSetting
-            title="Hook config"
-            body="Skill Manager merges one UserPromptSubmit command into this file and leaves other hooks in place."
-            input={<ReadOnlyCode value={usageHook.hooksPath} />}
-          />
-          <PathSetting
-            title="Command"
-            body="Codex will ask you to trust this hook before it runs."
-            input={<ReadOnlyCode value={usageHook.command || usageHook.installedCommand || "Build the CLI before installing."} />}
-          />
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function SyncPanel({
-  report,
-  branchStatus,
-  autoSyncStatus,
-  gitStatus,
-  cleanCount,
-  reviewCount,
-  localChangeCount,
-  unmanagedCount,
-  conflictCount,
-  repoInstallCount,
-  repoUpdateCount,
-  repoApplyCount,
-  busyId,
-  onPull,
-  onApplyRepoChanges,
-  onShowSkills,
-  onSettings
-}: {
-  report: StatusReport | null;
-  branchStatus: GitBranchSyncStatus;
-  autoSyncStatus: AutoSyncStatus;
-  gitStatus: string;
-  cleanCount: number;
-  reviewCount: number;
-  localChangeCount: number;
-  unmanagedCount: number;
-  conflictCount: number;
-  repoInstallCount: number;
-  repoUpdateCount: number;
-  repoApplyCount: number;
-  busyId: string | null;
-  onPull: () => void;
-  onApplyRepoChanges: () => void;
-  onShowSkills: (filter: Filter) => void;
-  onSettings: () => void;
-}) {
-  return (
-    <Card className="skill-panel sync-panel">
-      <section className="repo-strip" aria-label="Sync status">
-        <StatusTile label="Tracked" value={String(report?.managed.length ?? 0)} />
-        <StatusTile label="In sync" value={String(cleanCount)} tone="good" />
-        <StatusTile label="Needs action" value={String(reviewCount)} tone={reviewCount > 0 ? "risk" : "neutral"} />
-        <div className="path-stack">
-          <div className="path-stack-lines">
-            <PathLine icon={<FolderGit2 size={14} aria-hidden="true" />} label="Sync repo" value={report?.syncRepo ?? ""} />
-            <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Codex skills" value={report?.codexSkillsDir ?? ""} />
-            <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Agents skills" value={report?.agentsSkillsDir ?? ""} />
-          </div>
-          <div className="path-stack-controls">
-            <BranchSyncBadge status={branchStatus} />
-            <AutoSyncIndicator status={autoSyncStatus} />
-          </div>
-        </div>
-      </section>
-
-      <section className="sync-actions" aria-label="Sync actions">
-        <Button variant="primary" type="button" onClick={onApplyRepoChanges} disabled={busyId !== null || repoApplyCount === 0}>
-          {busyId === "apply-repo" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Download size={15} aria-hidden="true" />}
-          Apply repo changes{repoApplyCount > 0 ? ` (${repoApplyCount})` : ""}
-        </Button>
-        <Button variant="secondary" type="button" onClick={onPull} disabled={busyId !== null}>
-          {busyId === "pull" ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <CloudDownload size={15} aria-hidden="true" />}
-          Pull from remote
-        </Button>
-        <Button variant="secondary" type="button" onClick={onSettings} disabled={busyId !== null}>
-          <Settings size={15} aria-hidden="true" />
-          Paths
-        </Button>
-      </section>
-
-      <section className="sync-grid" aria-label="Sync work queues">
-        <SyncQueueCard
-          title="Repo to this machine"
-          count={repoApplyCount}
-          body={`${repoInstallCount} missing local, ${repoUpdateCount} repo changed.`}
-          action="Review repo changes"
-          disabled={repoApplyCount === 0}
-          onClick={() => onShowSkills(repoInstallCount > 0 ? "missing_local" : "repo_modified")}
-        />
-        <SyncQueueCard
-          title="This machine to repo"
-          count={localChangeCount + unmanagedCount}
-          body={`${localChangeCount} tracked local change, ${unmanagedCount} local-only skill.`}
-          action="Review local changes"
-          disabled={localChangeCount + unmanagedCount === 0}
-          onClick={() => onShowSkills(localChangeCount > 0 ? "local_modified" : "unmanaged")}
-        />
-        <SyncQueueCard
-          title="Conflicts"
-          count={conflictCount}
-          body="Both sides changed or duplicate local copies differ."
-          action="Review conflicts"
-          disabled={conflictCount === 0}
-          tone={conflictCount > 0 ? "risk" : "neutral"}
-          onClick={() => onShowSkills("conflict")}
-        />
-      </section>
-
-      <section className="sync-log" aria-label="Git working tree">
+    <Card className="settings-panel" aria-labelledby="settings-title">
+      <CardHeader className="settings-head">
         <div>
-          <p className="eyebrow">Git working tree</p>
-          <h2>{gitStatus.trim().length > 0 ? "Uncommitted changes" : "Clean"}</h2>
+          <p className="eyebrow">Local configuration</p>
+          <CardTitle id="settings-title">Paths</CardTitle>
         </div>
-        <pre>{gitStatus.trim().length > 0 ? gitStatus : "No uncommitted sync repository changes."}</pre>
-      </section>
-    </Card>
-  );
-}
+        <Button variant="primary" type="button" onClick={onSave} disabled={saving}>
+          {saving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <FolderGit2 size={15} aria-hidden="true" />}
+          Save paths
+        </Button>
+      </CardHeader>
 
-function SyncQueueCard({
-  title,
-  count,
-  body,
-  action,
-  disabled,
-  tone = "neutral",
-  onClick
-}: {
-  title: string;
-  count: number;
-  body: string;
-  action: string;
-  disabled: boolean;
-  tone?: "neutral" | "risk";
-  onClick: () => void;
-}) {
-  return (
-    <div className={`sync-queue ${tone}`}>
-      <div>
-        <span>{title}</span>
-        <strong>{count}</strong>
-      </div>
-      <p>{body}</p>
-      <Button variant="secondary" size="sm" type="button" disabled={disabled} onClick={onClick}>
-        {action}
-      </Button>
-    </div>
-  );
-}
-
-function UsagePanel({
-  usageHook,
-  rows,
-  usedCount,
-  neverUsedCount,
-  staleCount,
-  busyId,
-  onInstallHook,
-  onRemoveHook,
-  onSelectRow
-}: {
-  usageHook: UsageHookStatus;
-  rows: SkillRow[];
-  usedCount: number;
-  neverUsedCount: number;
-  staleCount: number;
-  busyId: string | null;
-  onInstallHook: () => void;
-  onRemoveHook: () => void;
-  onSelectRow: (row: SkillRow) => void;
-}) {
-  const installingHook = busyId === "hook-install";
-  const removingHook = busyId === "hook-remove";
-
-  return (
-    <Card className="skill-panel usage-panel">
-      <section className="repo-strip usage-strip" aria-label="Usage status">
-        <StatusTile label="Installed" value={String(rows.length)} />
-        <StatusTile label="Used" value={String(usedCount)} tone="good" />
-        <StatusTile label="Never used" value={String(neverUsedCount)} tone={neverUsedCount > 0 ? "risk" : "neutral"} />
-        <StatusTile label="30d idle" value={String(staleCount)} tone={staleCount > 0 ? "risk" : "neutral"} />
-      </section>
-
-      <section className="usage-hook-panel" aria-label="Usage hook">
-        <div className="hook-summary">
-          <Badge variant={usageHook.installed && !usageHook.needsUpdate ? "success" : "warning"}>
-            {usageHook.installed ? (usageHook.needsUpdate ? "Hook update available" : "Hook installed") : "Hook not installed"}
-          </Badge>
-          <p>
-            Last used is recorded from explicit skill mentions in Codex prompts. The hook stores only skill id, timestamp,
-            and source.
-          </p>
-          {usageHook.reason ? <p className="hook-warning">{usageHook.reason}</p> : null}
-        </div>
-        <div className="settings-actions">
-          <Button variant="primary" type="button" onClick={onInstallHook} disabled={installingHook || removingHook || !usageHook.installable}>
-            {installingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Clock3 size={15} aria-hidden="true" />}
-            {usageHook.installed ? (usageHook.needsUpdate ? "Update hook" : "Reinstall hook") : "Install hook"}
-          </Button>
-          <Button variant="secondary" type="button" onClick={onRemoveHook} disabled={installingHook || removingHook || !usageHook.installed}>
-            {removingHook ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
-            Remove
-          </Button>
-        </div>
-      </section>
-
-      <section className="skill-list" aria-label="Usage by skill">
-        <div className="skill-table-scroll">
-          <div className="table-head usage-table-head" role="row">
-            <span>Name</span>
-            <span>Source</span>
-            <span>Last used</span>
-            <span>Local modified</span>
+      <CardContent className="settings-paths">
+        <PathSetting
+          title="Git sync repository"
+          body="Tracked by Git. Skills, metadata, and future sync commits live here."
+          input={
+            <PathInput
+              id="settings-sync-repo-path"
+              label="Path"
+              value={paths.syncRepo}
+              onChange={(value) => onPathChange("syncRepo", value)}
+              onChoose={() => onChoose("syncRepo", "Choose a sync repository directory")}
+              choosing={selectingPath === "syncRepo"}
+            />
+          }
+        />
+        <details className="advanced-settings">
+          <summary>Advanced local paths</summary>
+          <div className="advanced-settings-body">
+            <PathSetting
+              title="Codex skills directory"
+              body="Local Codex skills on this machine. Usually ~/.codex/skills."
+              input={
+                <PathInput
+                  id="settings-codex-skills-path"
+                  label="Path"
+                  value={paths.codexSkillsDir}
+                  onChange={(value) => onPathChange("codexSkillsDir", value)}
+                  onChoose={() => onChoose("codexSkillsDir", "Choose a Codex skills directory")}
+                  choosing={selectingPath === "codexSkillsDir"}
+                />
+              }
+            />
+            <PathSetting
+              title="Agents skills directory"
+              body="Local skills used by the agents skill system. Usually ~/.agents/skills."
+              input={
+                <PathInput
+                  id="settings-agents-skills-path"
+                  label="Path"
+                  value={paths.agentsSkillsDir}
+                  onChange={(value) => onPathChange("agentsSkillsDir", value)}
+                  onChoose={() => onChoose("agentsSkillsDir", "Choose an Agents skills directory")}
+                  choosing={selectingPath === "agentsSkillsDir"}
+                />
+              }
+            />
+            <PathSetting
+              title="Local cache directory"
+              body="Local-only app state. Defaults to ~/.codex-skill-manager/cache and is never meant for Git sync."
+              input={
+                <PathInput
+                  id="settings-cache-path"
+                  label="Path"
+                  value={paths.cacheDir}
+                  onChange={(value) => onPathChange("cacheDir", value)}
+                  onChoose={() => onChoose("cacheDir", "Choose a local cache directory")}
+                  choosing={selectingPath === "cacheDir"}
+                />
+              }
+            />
           </div>
-          {rows.length === 0 ? (
-            <div className="empty-state">
-              <h2>No installed skills</h2>
-              <p>Install or add skills to begin collecting usage timestamps.</p>
-            </div>
-          ) : null}
-          {rows.map((row) => (
-            <button className="usage-row" type="button" key={`usage:${rowKey(row)}`} onClick={() => onSelectRow(row)}>
-              <span className="skill-main">
-                <strong>{row.name || row.id}</strong>
-                <small>{row.id}</small>
-              </span>
-              <Badge variant="outline" className={`source-badge ${row.source}`}>
-                {sourceLabel(row.source)}
-              </Badge>
-              <span>{formatLastUsed(row.lastUsedAt)}</span>
-              <span>{formatLocalModified(row.localModifiedAt)}</span>
-            </button>
-          ))}
-        </div>
-      </section>
+        </details>
+      </CardContent>
     </Card>
   );
 }
@@ -1950,6 +1652,31 @@ function PathSummary({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <code>{value}</code>
     </div>
+  );
+}
+
+function SortableHeader<TSortKey extends string>({
+  label,
+  sortKey,
+  sort,
+  onSort
+}: {
+  label: string;
+  sortKey: TSortKey;
+  sort: SortState<TSortKey>;
+  onSort: (key: TSortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const ariaSort = active ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
+  const Icon = active ? (sort.direction === "asc" ? ChevronUp : ChevronDown) : ArrowUpDown;
+
+  return (
+    <span className="sortable-head" role="columnheader" aria-sort={ariaSort}>
+      <button className={active ? "table-sort-button active" : "table-sort-button"} type="button" onClick={() => onSort(sortKey)}>
+        <span>{label}</span>
+        <Icon size={13} aria-hidden="true" />
+      </button>
+    </span>
   );
 }
 
@@ -2032,7 +1759,7 @@ function buildRows(report: StatusReport): SkillRow[] {
       installed: false,
     repoHash: skill.hash,
     localHash: null,
-    lastUsedAt: null,
+    lastUsedAt: skill.lastUsedAt ?? null,
     repoPath: skill.path,
     localPath: null,
     localModifiedAt: null
@@ -2073,7 +1800,7 @@ function groupUnmanagedRows(report: StatusReport): SkillRow[] {
       installed: true,
       repoHash: null,
       localHash: preferred.hash,
-      lastUsedAt: null,
+      lastUsedAt: latestScannedUsageAt(skills),
       repoPath: null,
       localPath: skills
         .map((skill) => `${sourceLabel(skill.source === "agents" ? "agents" : "codex")}: ${skill.path}`)
@@ -2089,6 +1816,18 @@ function latestScannedModifiedAt(skills: Array<{ modifiedAt: string }>): string 
   }
 
   return skills.map((skill) => skill.modifiedAt).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
+}
+
+function latestScannedUsageAt(skills: Array<{ lastUsedAt?: string | null }>): string | null {
+  return latestTimestamp(skills.map((skill) => skill.lastUsedAt ?? null));
+}
+
+function latestTimestamp(values: Array<string | null>): string | null {
+  return (
+    values
+      .filter((value): value is string => Boolean(value))
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null
+  );
 }
 
 function localCandidateHashes(skills: Array<{ hash: string }>): string[] {
@@ -2201,6 +1940,57 @@ function StatusTile({ label, value, tone = "neutral" }: { label: string; value: 
     <div className={`status-tile ${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function SummaryAction({
+  icon,
+  label,
+  value,
+  detail,
+  tone = "neutral",
+  disabled,
+  onClick
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+  tone?: "neutral" | "risk";
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`summary-action ${tone}`} type="button" onClick={onClick} disabled={disabled}>
+      <span className="summary-action-head">
+        <span className="summary-action-icon">{icon}</span>
+        <span>{label}</span>
+      </span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </button>
+  );
+}
+
+function UsageTraceStatus({ status }: { status: UsageMonitorStatus }) {
+  const healthy = status.enabled && !status.lastError;
+  const label = status.running ? "Scanning" : status.enabled ? "Listening" : "Paused";
+
+  return (
+    <div className={`usage-trace-status ${status.lastError ? "risk" : healthy ? "good" : "neutral"}`}>
+      <span className="summary-action-head">
+        <span className="summary-action-icon">
+          <Clock3 size={15} aria-hidden="true" />
+        </span>
+        <span>Usage scan</span>
+      </span>
+      <strong>{label}</strong>
+      <small>
+        {status.lastError
+          ? status.lastError
+          : `Tool-call scan every ${Math.round(status.intervalMs / 1000)}s. Last scan ${formatMonitorTime(status.lastScanCompletedAt)}.`}
+      </small>
     </div>
   );
 }
@@ -2875,8 +2665,6 @@ function filterLabel(filter: Filter) {
 function viewTitle(view: View) {
   const titles: Record<View, string> = {
     skills: "Skills",
-    sync: "Sync",
-    usage: "Usage",
     archive: "Archive",
     settings: "Settings"
   };
@@ -2884,33 +2672,146 @@ function viewTitle(view: View) {
   return titles[view];
 }
 
-function compareUsageRows(a: SkillRow, b: SkillRow) {
-  if (a.lastUsedAt && b.lastUsedAt) {
-    return new Date(b.lastUsedAt).getTime() - new Date(a.lastUsedAt).getTime();
+function viewFromLocation(): View {
+  if (typeof window === "undefined") {
+    return "skills";
   }
 
-  if (a.lastUsedAt) {
+  return viewFromPath(window.location.pathname);
+}
+
+function viewFromPath(pathname: string): View {
+  switch (normalizeRoutePath(pathname)) {
+    case "/archive":
+      return "archive";
+    case "/settings":
+      return "settings";
+    case "/":
+    case "/skills":
+    default:
+      return "skills";
+  }
+}
+
+function normalizeRoutePath(pathname: string): string {
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function readInitialTheme(): Theme {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+
+  const stored = window.localStorage.getItem(themeStorageKey);
+  if (stored === "light" || stored === "dark") {
+    return stored;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function nextSortState<TSortKey extends string>(current: SortState<TSortKey>, key: TSortKey): SortState<TSortKey> {
+  if (current.key === key) {
+    return {
+      key,
+      direction: current.direction === "asc" ? "desc" : "asc"
+    };
+  }
+
+  return {
+    key,
+    direction: defaultSortDirection(key)
+  };
+}
+
+function defaultSortDirection(key: string): SortDirection {
+  return key.includes("used") || key.includes("modified") || key.includes("archived") ? "desc" : "asc";
+}
+
+function compareSkillRows(a: SkillRow, b: SkillRow, sort: SortState<SkillSortKey>) {
+  let result = 0;
+  switch (sort.key) {
+    case "name":
+      result = compareRowNames(a, b, sort.direction);
+      break;
+    case "source":
+      result = compareTextValues(sourceLabel(a.source), sourceLabel(b.source), sort.direction);
+      break;
+    case "state":
+      result = compareTextValues(syncLabel(a.syncState), syncLabel(b.syncState), sort.direction);
+      break;
+    case "local_copy":
+      result = compareTextValues(a.installed ? "Installed" : "Missing", b.installed ? "Installed" : "Missing", sort.direction);
+      break;
+    case "local_modified":
+      result = compareTimestampValues(a.localModifiedAt, b.localModifiedAt, sort.direction);
+      break;
+    case "last_used":
+      result = compareTimestampValues(a.lastUsedAt, b.lastUsedAt, sort.direction);
+      break;
+  }
+
+  return result || compareRowNames(a, b, "asc");
+}
+
+function compareArchiveRows(a: ArchiveRow, b: ArchiveRow, sort: SortState<ArchiveSortKey>) {
+  let result = 0;
+  switch (sort.key) {
+    case "name":
+      result = compareNamedRecords(a, b, sort.direction);
+      break;
+    case "archived_at":
+      result = compareTimestampValues(a.archivedAt, b.archivedAt, sort.direction);
+      break;
+    case "archive_path":
+      result = compareTextValues(a.archivePath, b.archivePath, sort.direction);
+      break;
+    case "copy":
+      result = compareTextValues(a.archiveCopyStatus, b.archiveCopyStatus, sort.direction);
+      break;
+  }
+
+  return result || compareNamedRecords(a, b, "asc");
+}
+
+function compareRowNames(a: SkillRow, b: SkillRow, direction: SortDirection) {
+  return compareNamedRecords(a, b, direction);
+}
+
+function compareNamedRecords(a: { id: string; name: string }, b: { id: string; name: string }, direction: SortDirection) {
+  return compareTextValues(a.name || a.id, b.name || b.id, direction) || compareTextValues(a.id, b.id, direction);
+}
+
+function compareTextValues(a: string, b: string, direction: SortDirection) {
+  const result = a.localeCompare(b, undefined, { sensitivity: "base" });
+  return direction === "asc" ? result : -result;
+}
+
+function compareTimestampValues(a: string | null, b: string | null, direction: SortDirection) {
+  const aTime = parseTimestamp(a);
+  const bTime = parseTimestamp(b);
+  if (aTime !== null && bTime !== null) {
+    return direction === "asc" ? aTime - bTime : bTime - aTime;
+  }
+
+  if (aTime !== null) {
     return -1;
   }
 
-  if (b.lastUsedAt) {
+  if (bTime !== null) {
     return 1;
   }
 
-  return a.id.localeCompare(b.id);
+  return 0;
 }
 
-function isStaleUsageRow(row: SkillRow) {
-  if (!row.lastUsedAt) {
-    return false;
+function parseTimestamp(value: string | null) {
+  if (!value) {
+    return null;
   }
 
-  const usedAt = new Date(row.lastUsedAt);
-  if (Number.isNaN(usedAt.getTime())) {
-    return false;
-  }
-
-  return Date.now() - usedAt.getTime() >= 30 * 24 * 60 * 60 * 1000;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : time;
 }
 
 function syncLabel(state: SkillRow["syncState"] | Filter) {
@@ -3067,6 +2968,10 @@ function formatArchiveDate(value: string | null) {
 
 function formatLocalModified(value: string | null) {
   return value ? formatTimestamp(value) : "No local copy";
+}
+
+function formatMonitorTime(value: string | null) {
+  return value ? formatTimestamp(value) : "Not yet";
 }
 
 function formatLastUsed(lastUsedAt: string | null) {

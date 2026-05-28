@@ -13,7 +13,6 @@ import { recordUsageEvent } from "./usage.js";
 import { removeLocalSkill } from "./removeLocalSkill.js";
 import { archiveSkill } from "./archiveSkill.js";
 import { updateLocalSkill } from "./updateLocalSkill.js";
-import { getUsageHookStatus, installUsageHook, recordSkillMentionsFromHookInput, removeUsageHook } from "./codexHook.js";
 
 const program = new Command();
 
@@ -125,56 +124,6 @@ program
   });
 
 program
-  .command("record-hook")
-  .description("Read Codex UserPromptSubmit hook input from stdin and record explicit skill mentions.")
-  .option("--json", "Print recorded skill ids")
-  .action(async (options) => {
-    const raw = await readStdin();
-    const input = parseHookInput(raw);
-    const result = await recordSkillMentionsFromHookInput(input);
-    if (options.json) {
-      console.log(JSON.stringify(result, null, 2));
-    }
-  });
-
-program
-  .command("hook-status")
-  .description("Show Codex usage hook status.")
-  .option("--json", "Print JSON")
-  .action(async (options) => {
-    const config = await loadLocalConfig();
-    const status = await getUsageHookStatus(config);
-    if (options.json) {
-      console.log(JSON.stringify(status, null, 2));
-      return;
-    }
-
-    console.log(`Codex hooks: ${status.hooksPath}`);
-    console.log(`Usage hook: ${status.installed ? (status.needsUpdate ? "installed, update available" : "installed") : "not installed"}`);
-    if (!status.installable && status.reason) {
-      console.log(`Install unavailable: ${status.reason}`);
-    }
-  });
-
-program
-  .command("install-codex-hook")
-  .description("Install the Codex UserPromptSubmit hook for explicit skill usage recording.")
-  .action(async () => {
-    const config = await loadLocalConfig();
-    const status = await installUsageHook(config);
-    console.log(`Installed Codex usage hook at ${status.hooksPath}`);
-  });
-
-program
-  .command("remove-codex-hook")
-  .description("Remove the Codex usage hook installed by Skill Manager.")
-  .action(async () => {
-    const config = await loadLocalConfig();
-    const status = await removeUsageHook(config);
-    console.log(`Removed Codex usage hook from ${status.hooksPath}`);
-  });
-
-program
   .command("pull")
   .description("Pull latest changes from the sync repository (fast-forward only).")
   .action(async () => {
@@ -240,27 +189,6 @@ function resolveSourceOption(value: string | undefined): "codex" | "agents" | un
   }
 
   throw new Error(`Invalid source: ${value}. Use "codex" or "agents".`);
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function parseHookInput(raw: string): unknown {
-  if (!raw.trim()) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
 }
 
 function formatBranchSummary(status: { state: string; ahead: number; behind: number; upstream: string | null }): string {

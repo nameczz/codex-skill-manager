@@ -49,6 +49,19 @@ describe("status", () => {
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
+    await recordUsageEvent(
+      {
+        schemaVersion: 1,
+        syncRepo,
+        codexSkillsDir,
+        agentsSkillsDir,
+        cacheDir: path.join(root, "cache"),
+        createdAt: now,
+        updatedAt: now
+      },
+      "klay-writer",
+      { invokedAt: "2026-01-08T00:00:00.000Z" }
+    );
 
     const config: LocalConfig = {
       schemaVersion: 1,
@@ -68,6 +81,7 @@ describe("status", () => {
     expect(report.unmanagedLocal.map((skill) => skill.id)).toEqual(["klay-writer", "local-only"]);
     expect(report.unmanagedLocal.find((skill) => skill.id === "klay-writer")?.source).toBe("agents");
     expect(report.unmanagedLocal.find((skill) => skill.id === "klay-writer")?.modifiedAt).toEqual(expect.any(String));
+    expect(report.unmanagedLocal.find((skill) => skill.id === "klay-writer")?.lastUsedAt).toBe("2026-01-08T00:00:00.000Z");
   });
 
   it("injects last used time from usage events into managed report rows", async () => {

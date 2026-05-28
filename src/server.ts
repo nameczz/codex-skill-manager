@@ -19,8 +19,8 @@ import { recordUsageEvent } from "./usage.js";
 import { updateLocalSkill } from "./updateLocalSkill.js";
 import { restoreArchivedSkill } from "./restoreArchivedSkill.js";
 import { resolveConflict } from "./resolveConflict.js";
-import { getUsageHookStatus, installUsageHook, removeUsageHook } from "./codexHook.js";
 import { createAutoSyncController } from "./autoSync.js";
+import { createUsageMonitor } from "./usageMonitor.js";
 import {
   getDefaultAgentsSkillsDir,
   getDefaultCacheDir,
@@ -95,9 +95,11 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
   const directoryPicker = options.directoryPicker ?? selectDirectory;
   const app = fastify({ logger: false });
   const autoSync = createAutoSyncController();
+  const usageMonitor = createUsageMonitor();
 
   if (config) {
     await autoSync.start(config);
+    await usageMonitor.start(config);
   }
 
   app.setErrorHandler((error, _request, reply) => {
@@ -122,15 +124,16 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
       };
     }
 
+    await usageMonitor.scanNow();
     const report = await buildStatusReport(config);
     return {
       configured: true,
       config,
-      usageHook: await getUsageHookStatus(config),
       gitStatus: await gitStatus(config.syncRepo),
       gitBranchStatus: await gitBranchSyncStatus(config.syncRepo),
       report,
-      autoSync: autoSync.getStatus()
+      autoSync: autoSync.getStatus(),
+      usageMonitor: usageMonitor.getStatus()
     };
   });
 
@@ -149,12 +152,13 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     });
     config = result.config;
     await autoSync.start(config);
+    await usageMonitor.start(config);
     return {
       configured: true,
       gitInitialized: result.gitInitialized,
       config: result.config,
-      usageHook: await getUsageHookStatus(result.config),
-      autoSync: autoSync.getStatus()
+      autoSync: autoSync.getStatus(),
+      usageMonitor: usageMonitor.getStatus()
     };
   });
 
@@ -169,15 +173,16 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     });
     config = result.config;
     await autoSync.start(config);
+    await usageMonitor.start(config);
     return {
       configured: true,
       gitInitialized: result.gitInitialized,
       config: result.config,
-      usageHook: await getUsageHookStatus(result.config),
       gitStatus: await gitStatus(result.config.syncRepo),
       gitBranchStatus: await gitBranchSyncStatus(result.config.syncRepo),
       report: await buildStatusReport(result.config),
-      autoSync: autoSync.getStatus()
+      autoSync: autoSync.getStatus(),
+      usageMonitor: usageMonitor.getStatus()
     };
   });
 
@@ -270,21 +275,6 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     };
   });
 
-  app.get("/api/codex-hook", async () => {
-    const loaded = requireConfig(config);
-    return { usageHook: await getUsageHookStatus(loaded) };
-  });
-
-  app.post("/api/codex-hook", async () => {
-    const loaded = requireConfig(config);
-    return { usageHook: await installUsageHook(loaded) };
-  });
-
-  app.delete("/api/codex-hook", async () => {
-    const loaded = requireConfig(config);
-    return { usageHook: await removeUsageHook(loaded) };
-  });
-
   app.post<{ Body: SkillActionBody }>("/api/skill-file", async (request) => {
     const loaded = requireConfig(config);
     const filePath = localSkillMdPath(loaded, request.body);
@@ -373,6 +363,7 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     url: address,
     close: async () => {
       await autoSync.stop();
+      await usageMonitor.stop();
       await app.close();
     }
   };
