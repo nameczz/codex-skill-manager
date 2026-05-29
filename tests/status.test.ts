@@ -45,7 +45,6 @@ describe("status", () => {
       lastUsedAt: "2026-01-01T00:00:00.000Z",
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
@@ -110,7 +109,6 @@ describe("status", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
@@ -168,7 +166,6 @@ describe("status", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
@@ -214,7 +211,6 @@ describe("status", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
@@ -234,7 +230,7 @@ describe("status", () => {
     expect(report.managed[0]?.localCopiesDiffer).toBe(false);
   });
 
-  it("includes archived records from metadata and enriches them from archive copy frontmatter", async () => {
+  it("ignores legacy archived skill records in status reports", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "csm-status-archived-"));
     const syncRepo = path.join(root, "repo");
     const codexSkillsDir = path.join(root, "codex-skills");
@@ -242,10 +238,9 @@ describe("status", () => {
     await ensureRepoMetadata(syncRepo);
 
     await writeSkill(path.join(syncRepo, "archive", "writer"), "Writer Archive");
-    await mkdir(path.join(syncRepo, "archive", "ghost"), { recursive: true });
 
     const now = new Date().toISOString();
-    const archived: SkillRecord = {
+    const archived = {
       id: "writer",
       name: "Old writer",
       description: "Legacy entry",
@@ -259,9 +254,9 @@ describe("status", () => {
       createdAt: now,
       updatedAt: now,
       archivedAt: now
-    };
+    } as unknown as SkillRecord;
 
-    await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [archived] });
+    await writeFile(path.join(syncRepo, "metadata", "skills.json"), JSON.stringify({ schemaVersion: 1, skills: [archived] }), "utf8");
 
     const config: LocalConfig = {
       schemaVersion: 1,
@@ -275,14 +270,6 @@ describe("status", () => {
 
     const report = await buildStatusReport(config);
 
-    expect(report.archived).toHaveLength(1);
-    expect(report.archived[0]?.id).toBe("writer");
-    expect(report.archived[0]?.name).toBe("Writer Archive");
-    expect(report.archived[0]?.description).toBe("Test skill");
-    expect(report.archived[0]?.archiveCopyStatus).toBe("present");
-    expect(report.archived[0]?.archivePath).toBe(path.join(syncRepo, "archive", "writer"));
-    expect(report.archived[0]?.currentRepoHash).toEqual(expect.any(String));
-    expect(report.archived[0]?.archiveHash).toEqual(expect.any(String));
     expect(report.repoOnly).toHaveLength(0);
     expect(report.managed).toHaveLength(0);
   });
@@ -314,7 +301,6 @@ describe("status", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
 
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });

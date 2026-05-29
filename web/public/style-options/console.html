@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Style 02, Night Console</title>
+    <link rel="stylesheet" href="./common.css" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: oklch(0.17 0.012 248);
+        --sidebar: oklch(0.145 0.012 248);
+        --panel: oklch(0.205 0.013 248);
+        --panel-2: oklch(0.255 0.014 248);
+        --control: oklch(0.18 0.012 248);
+        --ink: oklch(0.92 0.008 248);
+        --muted: oklch(0.66 0.02 248);
+        --line: oklch(0.34 0.015 248);
+        --accent: oklch(0.69 0.13 235);
+        --accent-soft: oklch(0.28 0.055 235);
+        --success: oklch(0.76 0.14 150);
+        --success-soft: oklch(0.29 0.055 150);
+        --danger: oklch(0.72 0.15 28);
+        --danger-soft: oklch(0.29 0.06 28);
+        --table-head: oklch(0.16 0.012 248);
+        --shadow: 0 22px 50px oklch(0.02 0.006 248 / 0.44);
+      }
+
+      body {
+        color: var(--ink);
+      }
+
+      .main {
+        padding-top: 24px;
+      }
+
+      .tile,
+      .path-panel,
+      .toolbar,
+      .table-frame,
+      .preview-card {
+        background: var(--panel);
+      }
+
+      .row:hover,
+      .archive-row:hover {
+        background: oklch(0.235 0.014 248);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="option-shell">
+      <aside class="option-sidebar">
+        <div class="brand">
+          <div class="brand-mark">CS</div>
+          <div>
+            <strong>Skill Manager</strong>
+            <span>Night operations view</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="active" href="#">Skills <span>128</span></a>
+          <a href="#">Codex Archive <span>10</span></a>
+          <a href="#">Settings</a>
+        </nav>
+      </aside>
+      <main class="main">
+        <div class="header">
+          <div class="title">
+            <div class="kicker">Codex Skill Manager</div>
+            <h1>Codex Archive</h1>
+          </div>
+          <div class="actions">
+            <a class="button" href="./index.html">Options</a>
+            <button class="button">Refresh</button>
+            <button class="button primary">Auto-sync watching</button>
+          </div>
+        </div>
+        <section class="status-grid">
+          <div class="tile"><span>Archived</span><strong>10</strong></div>
+          <div class="tile"><span>Showing</span><strong style="color: var(--success)">Active</strong></div>
+          <div class="tile"><span>Preview</span><strong>On demand</strong></div>
+          <div class="path-panel">
+            <div class="path-row"><span>Archive source</span><code>~/.codex/archived_sessions</code></div>
+            <div class="path-row"><span>Trash</span><code>~/.codex/archived_sessions/.trash</code></div>
+          </div>
+        </section>
+        <section class="toolbar">
+          <div class="control">Search archived sessions</div>
+          <div class="control">State: Active</div>
+          <div class="control">Rows: 20</div>
+        </section>
+        <section class="archive-layout">
+          <div class="table-frame">
+            <div class="table-scroll">
+              <div style="min-width: 1080px">
+                <div class="archive-head">
+                  <span>Title</span><span>Archived at</span><span>Updated</span><span>Workspace</span><span>Source</span><span>Size</span><span>Action</span>
+                </div>
+                <div class="archive-row">
+                  <div class="cell archive-title"><strong>调整 on-demand private link 按钮</strong><small>019e688e...5e00bb</small></div>
+                  <div class="cell time">2026/5/27<br />16:30:28</div>
+                  <div class="cell time">2026/5/27<br />16:30:37</div>
+                  <div class="cell archive-cwd">/Users/zilliz/.codex/worktrees/6d8d/zilliz-cloud</div>
+                  <div class="cell">Codex Desktop</div>
+                  <div class="cell">687 KB</div>
+                  <div class="row-actions"><button class="icon-button danger">D</button></div>
+                </div>
+                <div class="archive-row">
+                  <div class="cell archive-title"><strong>优化公众号文章内容和画风</strong><small>019e3e71...ebf2f0</small></div>
+                  <div class="cell time">2026/5/26<br />12:14:51</div>
+                  <div class="cell time">2026/5/26<br />12:14:59</div>
+                  <div class="cell archive-cwd">/Users/zilliz/working/czz-project</div>
+                  <div class="cell">Codex Desktop</div>
+                  <div class="cell">598 KB</div>
+                  <div class="row-actions"><button class="icon-button danger">D</button></div>
+                </div>
+                <div class="archive-row">
+                  <div class="cell archive-title"><strong>讲解 emulate</strong><small>019e1b57...74f460</small></div>
+                  <div class="cell time">2026/5/25<br />16:40:08</div>
+                  <div class="cell time">2026/5/25<br />16:40:08</div>
+                  <div class="cell archive-cwd">/Users/zilliz/Documents/New project 2</div>
+                  <div class="cell">Codex Desktop</div>
+                  <div class="cell">228 KB</div>
+                  <div class="row-actions"><button class="icon-button danger">D</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <aside class="preview-card">
+            <h2>Session preview</h2>
+            <p>Metadata stays visible first. Full JSONL preview only loads when a row is opened.</p>
+            <div class="meta-grid">
+              <div class="meta-field"><span class="meta-label">Workspace</span><strong>/Users/zilliz/working/czz-project</strong></div>
+              <div class="meta-field"><span class="meta-label">Source</span><strong>Codex Desktop</strong></div>
+              <div class="meta-field"><span class="meta-label">Action</span><strong>Move to Trash</strong></div>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

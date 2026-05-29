@@ -1,37 +1,43 @@
 import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
+import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "../../lib/utils";
 
-type ButtonVariant = "default" | "primary" | "secondary" | "outline" | "ghost" | "destructive" | "icon";
-type ButtonSize = "default" | "sm" | "lg" | "icon";
+const buttonVariants = cva("button", {
+  variants: {
+    variant: {
+      default: "primary",
+      primary: "primary",
+      secondary: "secondary",
+      outline: "secondary",
+      ghost: "ghost",
+      destructive: "danger",
+      icon: "icon-button"
+    },
+    size: {
+      default: "",
+      sm: "button-sm",
+      lg: "button-lg",
+      icon: "icon-button"
+    }
+  },
+  defaultVariants: {
+    variant: "default",
+    size: "default"
+  }
+});
 
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: ButtonVariant;
-  size?: ButtonSize;
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
+  asChild?: boolean;
 }
 
-const variantClass: Record<ButtonVariant, string> = {
-  default: "button primary",
-  primary: "button primary",
-  secondary: "button secondary",
-  outline: "button secondary",
-  ghost: "button ghost",
-  destructive: "button danger",
-  icon: "icon-button"
-};
-
-const sizeClass: Record<ButtonSize, string> = {
-  default: "",
-  sm: "button-sm",
-  lg: "button-lg",
-  icon: "icon-button"
-};
-
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = "default", size = "default", ...props }, ref) => {
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Component = asChild ? Slot : "button";
     return (
-      <button
+      <Component
         ref={ref}
-        className={cn(variantClass[variant], sizeClass[size], className)}
+        className={cn(buttonVariants({ variant, size }), className)}
         {...props}
       />
     );

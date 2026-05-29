@@ -48,6 +48,74 @@ describe("server", () => {
     }
   });
 
+  it("serves Codex archive list, preview, delete, and restore APIs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-codex-archive-api-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+    const codexHome = process.env.CODEX_HOME;
+    if (!codexHome) {
+      throw new Error("CODEX_HOME missing in test setup.");
+    }
+    const archiveRoot = path.join(codexHome, "archived_sessions");
+    await mkdir(archiveRoot, { recursive: true });
+    const sessionId = "019e24bb-2ac1-7ab3-b603-b5b3a2edcee8";
+    const fileName = `rollout-2026-05-14T12-25-06-${sessionId}.jsonl`;
+    await writeFile(
+      path.join(archiveRoot, fileName),
+      [
+        JSON.stringify({ timestamp: "2026-05-14T04:25:42.646Z", type: "session_meta", payload: { id: sessionId, cwd: "/tmp/project", originator: "Codex Desktop" } }),
+        JSON.stringify({ timestamp: "2026-05-14T04:26:00.000Z", type: "event_msg", payload: { content: [{ text: "Preview text" }] } })
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(path.join(codexHome, "session_index.jsonl"), `${JSON.stringify({ id: sessionId, thread_name: "API archive test" })}\n`, "utf8");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const redirectResponse = await fetch(`${server.url}/archive`, { redirect: "manual" });
+      expect(redirectResponse.status).toBe(302);
+      expect(redirectResponse.headers.get("location")).toBe("/codex-archive");
+
+      const listResponse = await fetch(`${server.url}/api/codex-archive?state=active`);
+      const listPayload = (await listResponse.json()) as { items: Array<{ fileName: string; title: string }> };
+      expect(listResponse.ok).toBe(true);
+      expect(listPayload.items[0]).toMatchObject({ fileName, title: "API archive test" });
+
+      const previewResponse = await fetch(`${server.url}/api/codex-archive/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "active", fileName })
+      });
+      const previewPayload = (await previewResponse.json()) as { preview: string[] };
+      expect(previewResponse.ok).toBe(true);
+      expect(previewPayload.preview.join("\n")).toContain("Preview text");
+
+      const traversalResponse = await fetch(`${server.url}/api/codex-archive/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "active", fileName: "../escape.jsonl" })
+      });
+      expect(traversalResponse.status).toBe(400);
+
+      const deleteResponse = await fetch(`${server.url}/api/codex-archive/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "active", fileName })
+      });
+      expect(deleteResponse.ok).toBe(true);
+      expect(existsSync(path.join(archiveRoot, ".trash", fileName))).toBe(true);
+
+      const restoreResponse = await fetch(`${server.url}/api/codex-archive/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "trash", fileName })
+      });
+      expect(restoreResponse.ok).toBe(true);
+      expect(existsSync(path.join(archiveRoot, fileName))).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("requires the Web UI to provide a sync repository during initialization", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "csm-server-init-required-"));
     process.env.CSM_CONFIG_DIR = path.join(root, "config");
@@ -310,8 +378,68 @@ describe("server", () => {
     }
   });
 
-  it("archives a managed skill by moving it in the repo metadata and filesystem", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "csm-server-archive-"));
+  it("commits local usage metadata before pulling remote changes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-pull-usage-events-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const config = {
+        syncRepo: path.join(root, "repo"),
+        codexSkillsDir: path.join(root, "codex-skills"),
+        agentsSkillsDir: path.join(root, "agents-skills"),
+        cacheDir: path.join(root, "cache")
+      };
+
+      await fetch(`${server.url}/api/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+      });
+      const remote = await addRemote(root, config.syncRepo);
+      await ensureRepoMetadata(config.syncRepo);
+      await commitAll(config.syncRepo, "seed metadata");
+      const branch = await currentBranch(config.syncRepo);
+      await execFileAsync("git", ["-C", config.syncRepo, "push", "-u", "origin", branch]);
+
+      const clone = path.join(root, "remote-clone");
+      await execFileAsync("git", ["clone", "-b", branch, remote, clone]);
+      await writeFile(path.join(clone, "REMOTE.md"), "remote change\n", "utf8");
+      await commitAll(clone, "remote change");
+      await execFileAsync("git", ["-C", clone, "push", "origin", branch]);
+
+      await writeFile(
+        path.join(config.syncRepo, "metadata", "usage-events.jsonl"),
+        "{\"skillId\":\"foo\",\"invokedAt\":\"2026-01-01T00:00:00.000Z\",\"source\":\"record\"}\n",
+        "utf8"
+      );
+
+      const response = await fetch(`${server.url}/api/pull`, {
+        method: "POST"
+      });
+      const payload = (await response.json()) as {
+        preSync: { committed: boolean; commitHash: string | null } | null;
+        gitStatus: string;
+        gitBranchStatus: { state: string };
+      };
+
+      expect(response.ok).toBe(true);
+      expect(payload.preSync?.committed).toBe(true);
+      expect(payload.preSync?.commitHash).toMatch(/^[0-9a-f]+$/);
+      expect(payload.gitStatus).toBe("");
+      expect(payload.gitBranchStatus.state).toBe("up-to-date");
+      await expect(readFile(path.join(config.syncRepo, "REMOTE.md"), "utf8")).resolves.toContain("remote change");
+
+      const { stdout } = await execFileAsync("git", ["--git-dir", remote, "log", "--oneline", "--all"]);
+      expect(stdout).toContain("Sync repository changes");
+      expect(stdout).toContain("remote change");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("stops syncing a managed skill by deleting repo metadata and keeping local copies", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-stop-syncing-"));
     process.env.CSM_CONFIG_DIR = path.join(root, "config");
 
     const server = await startServer({ port: 0 });
@@ -332,8 +460,11 @@ describe("server", () => {
       await ensureRepoMetadata(config.syncRepo);
       await mkdir(path.join(config.syncRepo, "skills", "foo"), { recursive: true });
       await writeFile(path.join(config.syncRepo, "skills", "foo", "SKILL.md"), "id: foo", "utf8");
+      await mkdir(path.join(config.codexSkillsDir, "foo"), { recursive: true });
+      await writeFile(path.join(config.codexSkillsDir, "foo", "SKILL.md"), "id: foo local", "utf8");
 
       const hash = await hashDirectory(path.join(config.syncRepo, "skills", "foo"));
+      const localHash = await hashDirectory(path.join(config.codexSkillsDir, "foo"));
       const now = new Date().toISOString();
       const record: SkillRecord = {
         id: "foo",
@@ -341,32 +472,32 @@ describe("server", () => {
         description: "",
         status: "managed",
         localSource: "codex",
-        installed: false,
+        installed: true,
         syncState: "clean",
         lastSyncedHash: hash,
         currentRepoHash: hash,
-        currentLocalHash: null,
+        currentLocalHash: localHash,
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 
-      const response = await fetch(`${server.url}/api/archive`, {
+      const response = await fetch(`${server.url}/api/stop-syncing`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillId: "foo" })
       });
-      const payload = (await response.json()) as { record: SkillRecord };
+      const payload = (await response.json()) as { record: SkillRecord; result: { committed: boolean; pushed: boolean } };
 
       expect(response.ok).toBe(true);
-      expect(payload.record.status).toBe("archived");
-      expect(payload.record.archivedAt).toBeTruthy();
+      expect(payload.record.status).toBe("managed");
+      expect(payload.result.committed).toBe(true);
+      expect(payload.result.pushed).toBe(true);
       const metadata = await readSkillsMetadata(config.syncRepo);
-      expect(metadata.skills[0]?.status).toBe("archived");
+      expect(metadata.skills).toHaveLength(0);
       await expect(readFile(path.join(config.syncRepo, "skills", "foo", "SKILL.md"), "utf8")).rejects.toThrow();
-      await expect(readFile(path.join(config.syncRepo, "archive", "foo", "SKILL.md"), "utf8")).resolves.toContain("id: foo");
+      await expect(readFile(path.join(config.codexSkillsDir, "foo", "SKILL.md"), "utf8")).resolves.toContain("id: foo local");
     } finally {
       await server.close();
     }
@@ -412,7 +543,6 @@ describe("server", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -473,7 +603,6 @@ describe("server", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -534,8 +663,8 @@ describe("server", () => {
     }
   });
 
-  it("restores archived skill through API and commits metadata/filesystem changes", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "csm-server-restore-"));
+  it("lists and resolves repository skill conflicts through API", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-repo-conflicts-"));
     process.env.CSM_CONFIG_DIR = path.join(root, "config");
 
     const server = await startServer({ port: 0 });
@@ -551,41 +680,85 @@ describe("server", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config)
       });
-      await addRemote(root, config.syncRepo);
-      const archivePath = path.join(config.syncRepo, "archive", "writer");
-      await writeSkill(archivePath, "writer", "archived body");
-      const archivedHash = await hashDirectory(archivePath);
+      const remote = await addRemote(root, config.syncRepo);
+      await ensureRepoMetadata(config.syncRepo);
+      await writeSkill(path.join(config.syncRepo, "skills", "foo"), "foo", "Base body");
+      await writeSkill(path.join(config.codexSkillsDir, "foo"), "foo", "Base body");
+      const hash = await hashDirectory(path.join(config.syncRepo, "skills", "foo"));
       const now = new Date().toISOString();
-      const record: SkillRecord = {
-        id: "writer",
-        name: "writer",
-        description: "Archived skill",
-        status: "archived",
-        installed: false,
-        syncState: "missing_local",
-        lastSyncedHash: archivedHash,
-        currentRepoHash: archivedHash,
-        currentLocalHash: null,
-        lastUsedAt: null,
-        createdAt: now,
-        updatedAt: now,
-        archivedAt: now
-      };
-      await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
+      await writeSkillsMetadata(config.syncRepo, {
+        schemaVersion: 1,
+        skills: [
+          {
+            id: "foo",
+            name: "foo",
+            description: "Test skill",
+            status: "managed",
+            localSource: "codex",
+            installed: true,
+            syncState: "clean",
+            lastSyncedHash: hash,
+            currentRepoHash: hash,
+            currentLocalHash: hash,
+            lastUsedAt: null,
+            createdAt: now,
+            updatedAt: now
+          }
+        ]
+      });
+      await commitAll(config.syncRepo, "seed skill");
+      const branch = await currentBranch(config.syncRepo);
+      await execFileAsync("git", ["-C", config.syncRepo, "push", "-u", "origin", branch]);
 
-      const response = await fetch(`${server.url}/api/restore`, {
+      const clone = path.join(root, "clone");
+      await execFileAsync("git", ["clone", "-b", branch, remote, clone]);
+      await writeSkill(path.join(clone, "skills", "foo"), "foo", "Remote body");
+      await commitAll(clone, "remote skill update");
+      await execFileAsync("git", ["-C", clone, "push", "origin", branch]);
+
+      await writeSkill(path.join(config.syncRepo, "skills", "foo"), "foo", "Local body");
+      await commitAll(config.syncRepo, "local skill update");
+
+      const listResponse = await fetch(`${server.url}/api/repo-conflicts`);
+      const listPayload = (await listResponse.json()) as { conflicts: Array<{ skillId: string; versions: Array<{ source: string; content: string | null }> }> };
+      expect(listResponse.ok).toBe(true);
+      expect(listPayload.conflicts[0]?.skillId).toBe("foo");
+      expect(listPayload.conflicts[0]?.versions.find((version) => version.source === "github")?.content).toContain("Remote body");
+
+      const resolveResponse = await fetch(`${server.url}/api/repo-conflicts/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolutions: [{ skillId: "foo", source: "github" }] })
+      });
+      const resolvePayload = (await resolveResponse.json()) as { gitBranchStatus: { state: string } };
+
+      expect(resolveResponse.ok).toBe(true);
+      expect(resolvePayload.gitBranchStatus.state).toBe("up-to-date");
+      await expect(readFile(path.join(config.syncRepo, "skills", "foo", "SKILL.md"), "utf8")).resolves.toContain("Remote body");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not expose legacy skill archive endpoints", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "csm-server-legacy-archive-endpoints-"));
+    process.env.CSM_CONFIG_DIR = path.join(root, "config");
+
+    const server = await startServer({ port: 0 });
+    try {
+      const archiveResponse = await fetch(`${server.url}/api/archive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillId: "writer" })
       });
-      const payload = (await response.json()) as { record: SkillRecord; result: { committed: boolean } };
+      const restoreResponse = await fetch(`${server.url}/api/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId: "writer" })
+      });
 
-      expect(response.ok).toBe(true);
-      expect(payload.record.status).toBe("managed");
-      expect(payload.record.archivedAt).toBeNull();
-      expect(payload.result.committed).toBe(true);
-      expect(await readFile(path.join(config.syncRepo, "skills", "writer", "SKILL.md"), "utf8")).toContain("archived body");
-      expect(existsSync(path.join(config.syncRepo, "archive", "writer"))).toBe(false);
+      expect(archiveResponse.status).toBe(404);
+      expect(restoreResponse.status).toBe(404);
     } finally {
       await server.close();
     }
@@ -722,7 +895,6 @@ describe("server", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -795,7 +967,6 @@ describe("server", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -876,7 +1047,6 @@ describe("server", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(config.syncRepo, {
         schemaVersion: 1,
@@ -966,7 +1136,6 @@ describe("server", () => {
             lastUsedAt: null,
             createdAt: now,
             updatedAt: now,
-            archivedAt: null
           }
         ]
       });
@@ -1004,6 +1173,30 @@ async function addRemote(root: string, syncRepo: string): Promise<string> {
   await execFileAsync("git", ["init", "--bare", remote]);
   await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: syncRepo });
   return remote;
+}
+
+async function currentBranch(repo: string): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", repo, "branch", "--show-current"]);
+  const branch = stdout.trim();
+  if (!branch) {
+    throw new Error(`No current branch in ${repo}`);
+  }
+  return branch;
+}
+
+async function commitAll(repo: string, message: string): Promise<void> {
+  await execFileAsync("git", ["-C", repo, "add", "-A"]);
+  await execFileAsync("git", [
+    "-C",
+    repo,
+    "-c",
+    "user.name=Test User",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-m",
+    message
+  ]);
 }
 
 async function writeSkill(skillDir: string, name: string, body: string): Promise<void> {

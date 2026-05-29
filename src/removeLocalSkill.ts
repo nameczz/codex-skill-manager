@@ -19,10 +19,6 @@ export async function removeLocalSkill(config: LocalConfig, skillId: string, opt
   }
 
   const existing = metadata.skills[index];
-  if (existing.status === "archived") {
-    return existing;
-  }
-
   const targetSource = resolveRemoveSource(config, id, existing, options.source);
   if (targetSource.length === 0) {
     throw new Error(`No local copy found for ${id}.`);

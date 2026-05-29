@@ -14,12 +14,13 @@ import {
   Download,
   FilePenLine,
   FolderGit2,
-  FolderOpen,
   HardDrive,
   Layers3,
   GitCompareArrows,
   Loader2,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   PlusCircle,
   RefreshCw,
   Save,
@@ -29,15 +30,21 @@ import {
   ShieldAlert,
   Sun,
   Trash2,
+  Unlink2,
   X
 } from "lucide-react";
 import type {
   ApiStatus,
   AutoSyncStatus,
-  ArchiveCopyStatus,
   GitBranchSyncStatus,
   LocalSkillSource,
+  CodexArchivePreviewResponse,
+  CodexArchiveListResponse,
+  CodexArchiveSession,
   DependencyInstallInfo,
+  RepoConflictsResponse,
+  RepoConflictSource,
+  RepoSkillConflict,
   ResolveConflictResult,
   SkillRow,
   SkillVersion,
@@ -60,10 +67,15 @@ import {
   DialogPortal,
   DialogTitle
 } from "./components/ui/dialog";
+import { CommandPalette, type CommandPaletteAction } from "./components/CommandPalette";
+import { SettingsPanel, PathInput, PathSummary, type SetupPathField, type SetupPaths } from "./components/SettingsPanel";
 import { Input } from "./components/ui/input";
-import { Sheet, SheetContent, SheetHeader } from "./components/ui/sheet";
-import { Select } from "./components/ui/select";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "./components/ui/sheet";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
+import { Skeleton } from "./components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { Textarea } from "./components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip";
 
 const filters = [
   "all",
@@ -79,13 +91,6 @@ const pageSizes = [10, 20, 50, 100] as const;
 
 type Filter = (typeof filters)[number];
 type PageSize = (typeof pageSizes)[number];
-type SetupPaths = {
-  syncRepo: string;
-  codexSkillsDir: string;
-  agentsSkillsDir: string;
-  cacheDir: string;
-};
-type SetupPathField = keyof SetupPaths | "setupRoot";
 type View = "skills" | "settings" | "archive";
 type Theme = "light" | "dark";
 type SortDirection = "asc" | "desc";
@@ -94,10 +99,11 @@ type SortState<T extends string> = {
   direction: SortDirection;
 };
 type SkillSortKey = "name" | "source" | "state" | "local_copy" | "local_modified" | "last_used";
-type ArchiveSortKey = "name" | "archived_at" | "archive_path" | "copy";
+type CodexArchiveState = "active" | "trash";
+type ArchiveSortKey = "title" | "archived_at" | "updated_at" | "cwd" | "source" | "size";
 const viewRoutes: Record<View, string> = {
   skills: "/skills",
-  archive: "/archive",
+  archive: "/codex-archive",
   settings: "/settings"
 };
 const themeStorageKey = "csm-theme";
@@ -109,15 +115,10 @@ type EditorState = {
   content: string;
   dirty: boolean;
 };
-type SkillActionEndpoint = "import" | "install" | "update-local" | "archive" | "remove-local";
-type ArchiveRow = {
-  id: string;
-  name: string;
-  description: string;
-  archivedAt: string | null;
-  archivePath: string;
-  archiveCopyStatus: ArchiveCopyStatus;
-  status: "archived";
+type SkillActionEndpoint = "import" | "install" | "update-local" | "stop-syncing" | "remove-local";
+type CodexArchiveRow = CodexArchiveSession & {
+  state: CodexArchiveState;
+  sourceLabel: string;
 };
 type ResolveStrategy = "codex" | "agents" | "repo";
 type PendingSkillAction = {
@@ -136,12 +137,17 @@ export function App() {
   const [checkedRowKeys, setCheckedRowKeys] = useState<string[]>([]);
   const [editorState, setEditorState] = useState<EditorState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingSkillAction | null>(null);
-  const [pendingRestore, setPendingRestore] = useState<ArchiveRow | null>(null);
+  const [pendingArchiveDelete, setPendingArchiveDelete] = useState<CodexArchiveRow | null>(null);
   const [pendingEditRow, setPendingEditRow] = useState<SkillRow | null>(null);
   const [compareState, setCompareState] = useState<{ row: SkillRow; versions: SkillVersion[] } | null>(null);
+  const [repoConflictState, setRepoConflictState] = useState<{ conflicts: RepoSkillConflict[]; selections: Record<string, RepoConflictSource> } | null>(null);
   const [skillSort, setSkillSort] = useState<SortState<SkillSortKey>>({ key: "name", direction: "asc" });
-  const [archiveSort, setArchiveSort] = useState<SortState<ArchiveSortKey>>({ key: "name", direction: "asc" });
+  const [archiveSort, setArchiveSort] = useState<SortState<ArchiveSortKey>>({ key: "title", direction: "asc" });
   const [detailOpen, setDetailOpen] = useState(false);
+  const [archiveDetailOpen, setArchiveDetailOpen] = useState(false);
+  const [archiveState, setArchiveState] = useState<CodexArchiveState>("active");
+  const [archiveSessionRows, setArchiveSessionRows] = useState<CodexArchiveRow[]>([]);
+  const [archiveSession, setArchiveSession] = useState<CodexArchivePreviewResponse | null>(null);
   const [setupRoot, setSetupRoot] = useState("");
   const [setupPaths, setSetupPaths] = useState<SetupPaths>({
     syncRepo: "",
@@ -156,6 +162,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readInitialTheme());
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const navigateView = useCallback((nextView: View, options: { replace?: boolean } = {}) => {
     setView(nextView);
@@ -191,6 +199,27 @@ export function App() {
     }
   }
 
+  async function loadCodexArchiveSessions(options: { silent?: boolean } = {}) {
+    if (!options.silent) {
+      setLoading(true);
+    }
+    setError(null);
+    try {
+      const response = await fetch(`/api/codex-archive?state=${archiveState}`);
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      const payload = (await response.json()) as CodexArchiveListResponse;
+      setArchiveSessionRows(payload.items.map((item) => ({ ...item, state: payload.state, sourceLabel: item.source || "Unknown" })));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load Codex archive.");
+    } finally {
+      if (!options.silent) {
+        setLoading(false);
+      }
+    }
+  }
+
   useEffect(() => {
     void refresh();
   }, []);
@@ -204,6 +233,20 @@ export function App() {
       window.localStorage.setItem(themeStorageKey, theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    const openCommandPalette = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") {
+        return;
+      }
+
+      event.preventDefault();
+      setCommandOpen((open) => !open);
+    };
+
+    window.addEventListener("keydown", openCommandPalette);
+    return () => window.removeEventListener("keydown", openCommandPalette);
+  }, []);
 
   useEffect(() => {
     navigateView(viewFromLocation(), { replace: true });
@@ -251,16 +294,24 @@ export function App() {
   }, [status]);
 
   const archiveRows = useMemo(() => {
-    if (!status?.configured) {
-      return [];
-    }
-
-    return buildArchiveRows(status.report);
-  }, [status]);
+    return archiveSessionRows.map((row) => ({
+      ...row,
+      state: archiveState,
+      sourceLabel: row.source || "Unknown"
+    }));
+  }, [archiveSessionRows, archiveState]);
   const configured = status?.configured === true;
   const activeView = configured ? view : "skills";
   const report = configured ? status.report : null;
   const autoSyncStatus = configured ? status.autoSync : null;
+
+  useEffect(() => {
+    if (activeView !== "archive") {
+      return;
+    }
+
+    void loadCodexArchiveSessions();
+  }, [activeView, archiveState]);
 
   const filteredRows = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -280,9 +331,11 @@ export function App() {
     return archiveRows.filter((row) => {
       const matchesQuery =
         !normalized ||
-        row.id.toLowerCase().includes(normalized) ||
-        row.name.toLowerCase().includes(normalized) ||
-        row.description.toLowerCase().includes(normalized);
+        row.title.toLowerCase().includes(normalized) ||
+        row.sessionId.toLowerCase().includes(normalized) ||
+        row.fileName.toLowerCase().includes(normalized) ||
+        (row.cwd ?? "").toLowerCase().includes(normalized) ||
+        (row.source ?? "").toLowerCase().includes(normalized);
       return matchesQuery;
     }).sort((a, b) => compareArchiveRows(a, b, archiveSort));
   }, [archiveRows, archiveSort, query]);
@@ -346,7 +399,12 @@ export function App() {
 
   useEffect(() => {
     setPageIndex(0);
-  }, [archiveSort, filter, pageSize, query, skillSort]);
+  }, [archiveSort, archiveState, filter, pageSize, query, skillSort]);
+
+  useEffect(() => {
+    setArchiveSession(null);
+    setArchiveDetailOpen(false);
+  }, [archiveState]);
 
   useEffect(() => {
     setPageIndex((current) => Math.min(current, pageCount - 1));
@@ -367,6 +425,10 @@ export function App() {
         setEditorState(null);
       } else if (compareState) {
         setCompareState(null);
+      } else if (repoConflictState) {
+        setRepoConflictState(null);
+      } else if (archiveDetailOpen) {
+        setArchiveDetailOpen(false);
       } else if (detailOpen) {
         setDetailOpen(false);
       }
@@ -374,7 +436,7 @@ export function App() {
 
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [compareState, detailOpen, editorState]);
+  }, [archiveDetailOpen, compareState, detailOpen, editorState, repoConflictState]);
 
   async function initialize() {
     setError(null);
@@ -518,51 +580,70 @@ export function App() {
     void runSkillAction(action.endpoint, action.row);
   }
 
-  function requestRestore(row: ArchiveRow) {
-    setPendingRestore(row);
-  }
-
-  async function runRestoreArchived(row: ArchiveRow): Promise<boolean> {
-    const busyKey = restoreBusyId(row);
-    const payloadForNotice = row.name || row.id;
+  async function openArchiveSession(row: CodexArchiveRow) {
+    const busyKey = `archive-preview:${archiveRowKey(row)}`;
     setError(null);
     setNotice(null);
     setBusyId(busyKey);
     try {
-      const response = await fetch("/api/restore", {
+      const response = await fetch("/api/codex-archive/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ skillId: row.id })
+        body: JSON.stringify({ state: row.state, fileName: row.fileName })
       });
       if (!response.ok) {
         throw new Error(await readError(response));
       }
 
-      const payload = (await response.json()) as { result?: SyncResult };
-      if (payload.result) {
-        setNotice(syncResultMessage(payload.result));
-      } else {
-        setNotice(`Restored ${payloadForNotice}.`);
-      }
-
-      await refresh({ silent: true });
+      const payload = (await response.json()) as CodexArchivePreviewResponse;
+      setArchiveSession(payload);
+      setArchiveDetailOpen(true);
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Restore ${payloadForNotice} failed.`);
+      setError(err instanceof Error ? err.message : "Unable to load archived session preview.");
       return false;
     } finally {
       setBusyId(null);
     }
   }
 
-  async function confirmPendingRestore() {
-    const restoreRow = pendingRestore;
-    if (!restoreRow) {
+  async function runArchiveSessionAction(action: "delete" | "restore", row: CodexArchiveRow) {
+    const busyKey = `archive-${action}:${archiveRowKey(row)}`;
+    setError(null);
+    setNotice(null);
+    setBusyId(busyKey);
+    try {
+      const response = await fetch(`/api/codex-archive/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: row.state, fileName: row.fileName })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      setNotice(action === "delete" ? `Moved ${row.title} to archive trash.` : `Restored ${row.title} to active archive.`);
+      setArchiveSession(null);
+      setArchiveDetailOpen(false);
+      await loadCodexArchiveSessions({ silent: true });
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `${action === "delete" ? "Delete" : "Restore"} archived session failed.`);
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function confirmArchiveDelete() {
+    if (!pendingArchiveDelete) {
       return;
     }
 
-    setPendingRestore(null);
-    void runRestoreArchived(restoreRow);
+    const deleted = await runArchiveSessionAction("delete", pendingArchiveDelete);
+    if (deleted) {
+      setPendingArchiveDelete(null);
+    }
   }
 
   async function runBulkAction(endpoint: "import" | "install" | "update-local", targetRows: SkillRow[]) {
@@ -665,7 +746,75 @@ export function App() {
       await refresh({ silent: true });
       setNotice("Pulled latest changes from sync repository.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Pull failed.");
+      const message = err instanceof Error ? err.message : "Pull failed.";
+      if (message.includes("Cannot auto-resolve sync conflict") || message.includes("Review these paths manually")) {
+        setBusyId(null);
+        await openRepoConflicts();
+        return;
+      }
+      setError(message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function openRepoConflicts() {
+    setError(null);
+    setNotice(null);
+    setBusyId("repo-conflicts");
+    try {
+      const response = await fetch("/api/repo-conflicts");
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      const payload = (await response.json()) as RepoConflictsResponse;
+      if (payload.conflicts.length === 0) {
+        setNotice("No skill-level repo conflicts need review.");
+        await refresh({ silent: true });
+        return;
+      }
+
+      const selections: Record<string, RepoConflictSource> = {};
+      for (const conflict of payload.conflicts) {
+        selections[conflict.skillId] = conflict.versions.find((version) => version.exists)?.source ?? "github";
+      }
+      setRepoConflictState({ conflicts: payload.conflicts, selections });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load repo conflicts.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function resolveRepoConflicts() {
+    if (!repoConflictState) {
+      return;
+    }
+
+    setError(null);
+    setNotice(null);
+    setBusyId("repo-conflicts-resolve");
+    try {
+      const response = await fetch("/api/repo-conflicts/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resolutions: repoConflictState.conflicts.map((conflict) => ({
+            skillId: conflict.skillId,
+            source: repoConflictState.selections[conflict.skillId]
+          }))
+        })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+
+      setRepoConflictState(null);
+      await refresh({ silent: true });
+      setNotice("Resolved repo skill conflicts and pushed the merge.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to resolve repo conflicts.");
     } finally {
       setBusyId(null);
     }
@@ -843,8 +992,88 @@ export function App() {
     setArchiveSort((current) => nextSortState(current, key));
   }
 
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }, []);
+
+  const commandActions = useMemo<CommandPaletteAction[]>(
+    () => [
+      {
+        id: "go-skills",
+        label: "Go to Skills",
+        description: "Open skill sync table",
+        group: "Navigation",
+        keywords: ["skill", "sync"],
+        onSelect: () => navigateView("skills")
+      },
+      {
+        id: "go-archive",
+        label: "Go to Codex Archive",
+        description: "Review archived Codex sessions",
+        group: "Navigation",
+        disabled: !configured,
+        keywords: ["archive", "session"],
+        onSelect: () => navigateView("archive")
+      },
+      {
+        id: "go-settings",
+        label: "Go to Settings",
+        description: "Change local paths",
+        group: "Navigation",
+        disabled: !configured,
+        keywords: ["paths", "config"],
+        onSelect: () => navigateView("settings")
+      },
+      {
+        id: "refresh",
+        label: "Refresh",
+        description: "Reload local status",
+        group: "Actions",
+        disabled: busyId !== null,
+        onSelect: () => void refresh()
+      },
+      {
+        id: "pull",
+        label: "Pull remote changes",
+        description: "Fetch and apply Git repo updates",
+        group: "Actions",
+        disabled: !configured || activeView !== "skills" || busyId !== null,
+        keywords: ["git", "remote"],
+        onSelect: () => void pullFromRemote()
+      },
+      {
+        id: "apply-repo",
+        label: "Apply repo changes",
+        description: repoApplyCount > 0 ? `${repoApplyCount} local install/update action${repoApplyCount === 1 ? "" : "s"}` : "No repo changes to apply",
+        group: "Actions",
+        disabled: !configured || activeView !== "skills" || busyId !== null || repoApplyCount === 0,
+        keywords: ["install", "update"],
+        onSelect: () => void applyRepoChangesToLocal()
+      },
+      {
+        id: "toggle-theme",
+        label: theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+        description: "Toggle interface theme",
+        group: "Actions",
+        keywords: ["dark", "light"],
+        onSelect: toggleTheme
+      },
+      {
+        id: "clear-search",
+        label: "Clear search",
+        description: query ? "Clear the current search query" : "Search is already empty",
+        group: "Actions",
+        disabled: query.length === 0,
+        keywords: ["filter"],
+        onSelect: () => setQuery("")
+      }
+    ],
+    [activeView, busyId, configured, navigateView, query, repoApplyCount, theme, toggleTheme]
+  );
+
   return (
-    <div className="app-shell" data-theme={theme}>
+    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"} data-theme={theme}>
+      <CommandPalette actions={commandActions} open={commandOpen} onOpenChange={setCommandOpen} />
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand">
           <div className="brand-mark">
@@ -854,6 +1083,17 @@ export function App() {
             <strong>Skill Manager</strong>
             <span>Local sync workbench</span>
           </div>
+          <Button
+            className="sidebar-toggle"
+            variant="ghost"
+            size="icon"
+            type="button"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={15} aria-hidden="true" /> : <PanelLeftClose size={15} aria-hidden="true" />}
+          </Button>
         </div>
 
         <nav className="nav-list">
@@ -880,7 +1120,7 @@ export function App() {
             disabled={!configured}
           >
             <Archive size={16} aria-hidden="true" />
-            Archive
+            Codex Archive
           </Button>
           <Button
             className={configured && activeView === "settings" ? "nav-item active" : configured ? "nav-item" : "nav-item disabled"}
@@ -913,7 +1153,7 @@ export function App() {
               variant="secondary"
               size="sm"
               type="button"
-              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+              onClick={toggleTheme}
               aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
               title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
             >
@@ -923,6 +1163,10 @@ export function App() {
             <Button variant="secondary" size="sm" type="button" onClick={() => void refresh()}>
               <RefreshCw size={15} aria-hidden="true" />
               Refresh
+            </Button>
+            <Button variant="secondary" size="sm" type="button" onClick={() => setCommandOpen(true)} title="Command palette (⌘K)">
+              <Search size={15} aria-hidden="true" />
+              Command
             </Button>
             <Button
               variant="secondary"
@@ -1053,9 +1297,9 @@ export function App() {
         {configured && activeView === "skills" ? (
           <Card className="skill-panel">
             <section className="repo-strip" aria-label="Repository status">
-              <StatusTile label="Tracked" value={String(report?.managed.length ?? 0)} />
-              <StatusTile label="In sync" value={String(cleanCount)} tone="good" />
-              <StatusTile label="Needs action" value={String(reviewCount)} tone={reviewCount > 0 ? "risk" : "neutral"} />
+              <StatusTile label="Managed" value={String(report?.managed.length ?? 0)} />
+              <StatusTile label="Clean" value={String(cleanCount)} tone="good" />
+              <StatusTile label="Review" value={String(reviewCount)} tone={reviewCount > 0 ? "risk" : "neutral"} />
               <div className="path-stack">
                 <div className="path-stack-lines">
                   <PathLine icon={<FolderGit2 size={14} aria-hidden="true" />} label="Sync repo" value={report?.syncRepo ?? ""} />
@@ -1063,7 +1307,11 @@ export function App() {
                   <PathLine icon={<HardDrive size={14} aria-hidden="true" />} label="Agents skills" value={report?.agentsSkillsDir ?? ""} />
                 </div>
                 <div className="path-stack-controls">
-                  <BranchSyncBadge status={status.gitBranchStatus} />
+                  <BranchSyncBadge
+                    status={status.gitBranchStatus}
+                    busy={busyId === "repo-conflicts"}
+                    onReview={status.gitBranchStatus.state === "diverged" ? () => void openRepoConflicts() : undefined}
+                  />
                   <Button
                     className="path-stack-action"
                     variant="secondary"
@@ -1131,12 +1379,17 @@ export function App() {
 
               <label className="filter-select">
                 <span>State</span>
-                <Select value={filter} onChange={(event) => setFilter(event.target.value as Filter)} aria-label="Filter by state">
-                  {filters.map((item) => (
-                    <option key={item} value={item}>
-                      {filterLabel(item)}
-                    </option>
-                  ))}
+                <Select value={filter} onValueChange={(value) => setFilter(value as Filter)}>
+                  <SelectTrigger aria-label="Filter by state">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {filters.map((item) => (
+                      <SelectItem key={item} value={item}>
+                        {filterLabel(item)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
                 </Select>
               </label>
             </section>
@@ -1187,81 +1440,96 @@ export function App() {
             ) : null}
 
             <section className="skill-list" aria-label="Skills">
-              <div className="skill-table-scroll">
-                <div className="table-head" role="row">
-                  <span className="select-cell">
-                    <SelectAllCheckbox
-                      checked={visibleRowsSelected}
-                      mixed={someVisibleRowsSelected && !visibleRowsSelected}
-                      onChange={toggleVisibleRows}
-                    />
-                  </span>
-                  <SortableHeader label="Name" sortKey="name" sort={skillSort} onSort={updateSkillSort} />
-                  <SortableHeader label="Source" sortKey="source" sort={skillSort} onSort={updateSkillSort} />
-                  <SortableHeader label="State" sortKey="state" sort={skillSort} onSort={updateSkillSort} />
-                  <SortableHeader label="Local copy" sortKey="local_copy" sort={skillSort} onSort={updateSkillSort} />
-                  <SortableHeader label="Local modified" sortKey="local_modified" sort={skillSort} onSort={updateSkillSort} />
-                  <SortableHeader label="Last used" sortKey="last_used" sort={skillSort} onSort={updateSkillSort} />
-                  <span>Action</span>
-                </div>
-
-                {loading ? <SkeletonRows /> : null}
-
-                {!loading && filteredRows.length === 0 ? (
-                  <div className="empty-state">
-                    <h2>No skills match this view</h2>
-                    <p>Clear the search or switch filters to see available local and managed skills.</p>
-                  </div>
-                ) : null}
-
-                {!loading &&
-                  pageRows.map((row) => (
-                    <div
-                      tabIndex={0}
-                      className={selected && rowKey(selected) === rowKey(row) ? "skill-row selected" : "skill-row"}
-                      key={rowKey(row)}
-                      onClick={() => {
-                        setSelectedRowKey(rowKey(row));
-                        setDetailOpen(true);
-                      }}
-                      onKeyDown={(event) =>
-                        selectRowWithKeyboard(event, rowKey(row), (key) => {
-                          setSelectedRowKey(key);
-                          setDetailOpen(true);
-                        })
-                      }
-                    >
-                      <label className="row-checkbox" onClick={(event) => event.stopPropagation()}>
-                        <Checkbox
-                          checked={checkedRowKeys.includes(rowKey(row))}
-                          onChange={(event) => toggleRowChecked(row, event.target.checked)}
-                          aria-label={`Select ${row.name || row.id}`}
+              <div className="skill-table-scroll skills-table-scroll">
+                <Table className="skills-table">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="select-cell">
+                        <SelectAllCheckbox
+                          checked={visibleRowsSelected}
+                          mixed={someVisibleRowsSelected && !visibleRowsSelected}
+                          onChange={toggleVisibleRows}
                         />
-                      </label>
-                      <span className="skill-main">
-                        <strong>{row.name || row.id}</strong>
-                        <small>{row.id}</small>
-                      </span>
-                      <span>
-                        <Badge variant="outline" className={`source-badge ${row.source}`}>
-                          {sourceLabel(row.source)}
-                        </Badge>
-                      </span>
-                      <SyncBadge state={row.syncState} />
-                      <span className={row.installed ? "install-state installed" : "install-state"}>
-                        {row.installed ? "Installed" : "Missing"}
-                      </span>
-                      <span className="skill-time">{formatLocalModified(row.localModifiedAt)}</span>
-                      <span className="skill-time">{formatLastUsed(row.lastUsedAt)}</span>
-                      <RowAction
-                        row={row}
-                        busyId={busyId}
-                        onAction={requestSkillAction}
-                        onEdit={requestSkillEditor}
-                        onCompare={() => void openCompareVersions(row)}
-                      />
-                    </div>
-                  ))}
+                      </TableHead>
+                      <TableHead><SortableHeader label="Name" sortKey="name" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead><SortableHeader label="Source" sortKey="source" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead><SortableHeader label="State" sortKey="state" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead><SortableHeader label="Local copy" sortKey="local_copy" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead><SortableHeader label="Local modified" sortKey="local_modified" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead><SortableHeader label="Last used" sortKey="last_used" sort={skillSort} onSort={updateSkillSort} /></TableHead>
+                      <TableHead className="action-cell">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loading ? <SkeletonRows columns={8} /> : null}
+
+                    {!loading && filteredRows.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8}>
+                          <div className="empty-state">
+                            <h2>No skills match this view</h2>
+                            <p>Clear the search or switch filters to see available local and managed skills.</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
+
+                    {!loading &&
+                      pageRows.map((row) => (
+                        <TableRow
+                          tabIndex={0}
+                          className={selected && rowKey(selected) === rowKey(row) ? "skill-row selected" : "skill-row"}
+                          key={rowKey(row)}
+                          onClick={() => {
+                            setSelectedRowKey(rowKey(row));
+                            setDetailOpen(true);
+                          }}
+                          onKeyDown={(event) =>
+                            selectRowWithKeyboard(event, rowKey(row), (key) => {
+                              setSelectedRowKey(key);
+                              setDetailOpen(true);
+                            })
+                          }
+                        >
+                          <TableCell className="select-cell" onClick={(event) => event.stopPropagation()}>
+                            <Checkbox
+                              checked={checkedRowKeys.includes(rowKey(row))}
+                              onChange={(event) => toggleRowChecked(row, event.target.checked)}
+                              aria-label={`Select ${row.name || row.id}`}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <span className="skill-main">
+                              <strong>{row.name || row.id}</strong>
+                              <small>{row.id}</small>
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className={`source-badge ${row.source}`}>
+                              {sourceLabel(row.source)}
+                            </Badge>
+                          </TableCell>
+                          <TableCell><SyncBadge state={row.syncState} /></TableCell>
+                          <TableCell>
+                            <span className={row.installed ? "install-state installed" : "install-state"}>
+                              {row.installed ? "Installed" : "Missing"}
+                            </span>
+                          </TableCell>
+                          <TableCell><span className="skill-time">{formatLocalModified(row.localModifiedAt)}</span></TableCell>
+                          <TableCell><span className="skill-time">{formatLastUsed(row.lastUsedAt)}</span></TableCell>
+                          <TableCell className="action-cell">
+                            <RowAction
+                              row={row}
+                              busyId={busyId}
+                              onAction={requestSkillAction}
+                              onEdit={requestSkillEditor}
+                              onCompare={() => void openCompareVersions(row)}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
               </div>
               <div className="pagination-bar" aria-label="Skill table pagination">
                 <div className="pagination-summary">
@@ -1270,16 +1538,17 @@ export function App() {
                 </div>
                 <label className="page-size-select">
                   <span>Rows</span>
-                  <Select
-                    value={String(pageSize)}
-                    onChange={(event) => setPageSize(Number(event.target.value) as PageSize)}
-                    aria-label="Rows per page"
-                  >
-                    {pageSizes.map((size) => (
-                      <option key={size} value={size}>
-                        {size}
-                      </option>
-                    ))}
+                  <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value) as PageSize)}>
+                    <SelectTrigger aria-label="Rows per page">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {pageSizes.map((size) => (
+                        <SelectItem key={size} value={String(size)}>
+                          {size}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
                   </Select>
                 </label>
                 <div className="pagination-actions">
@@ -1316,25 +1585,20 @@ export function App() {
 
         {configured && activeView === "archive" ? (
           <Card className="skill-panel">
-            <section className="repo-strip" aria-label="Archive status">
-              <StatusTile label="Archived" value={String(report?.archived.length ?? 0)} tone="neutral" />
-              <StatusTile
-                label="Copy present"
-                value={String(report?.archived.filter((row) => row.archiveCopyStatus === "present").length ?? 0)}
-                tone="good"
-              />
-              <StatusTile
-                label="Copy missing"
-                value={String(report?.archived.filter((row) => row.archiveCopyStatus === "missing").length ?? 0)}
-                tone="risk"
-              />
+            <section className="repo-strip" aria-label="Codex archive status">
+              <StatusTile label={archiveState === "active" ? "Archived" : "Trash"} value={String(archiveRows.length)} tone="neutral" />
+              <StatusTile label="Showing" value={archiveState === "active" ? "Active" : "Trash"} tone={archiveState === "active" ? "good" : "risk"} />
+              <StatusTile label="Preview" value={archiveSession ? "Loaded" : "On demand"} tone="neutral" />
               <div className="path-stack">
                 <div className="path-stack-lines">
-                  <PathLine icon={<FolderGit2 size={14} aria-hidden="true" />} label="Sync repo" value={report?.syncRepo ?? ""} />
-                  <PathLine icon={<Archive size={14} aria-hidden="true" />} label="Archive root" value={report?.syncRepo ? `${report.syncRepo}/archive` : ""} />
+                  <PathLine icon={<Archive size={14} aria-hidden="true" />} label="Archive source" value="~/.codex/archived_sessions" />
+                  <PathLine icon={<Trash2 size={14} aria-hidden="true" />} label="Trash" value="~/.codex/archived_sessions/.trash" />
                 </div>
                 <div className="path-stack-controls">
-                  <BranchSyncBadge status={status.gitBranchStatus} />
+                  <Button className="path-stack-action" variant="secondary" size="sm" type="button" onClick={() => void loadCodexArchiveSessions()}>
+                    <RefreshCw size={14} aria-hidden="true" />
+                    Refresh archive
+                  </Button>
                 </div>
               </div>
             </section>
@@ -1342,56 +1606,104 @@ export function App() {
             <section className="toolbar" aria-label="Archive filters">
               <label className="search-box">
                 <Search size={16} aria-hidden="true" />
-                <span className="sr-only">Search archived skills</span>
+                <span className="sr-only">Search archived sessions</span>
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search archived skills"
+                  placeholder="Search archived sessions"
                   autoComplete="off"
                 />
               </label>
+              <label className="filter-select">
+                <span>State</span>
+                <Select value={archiveState} onValueChange={(value) => setArchiveState(value as CodexArchiveState)}>
+                  <SelectTrigger aria-label="Archive state">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active archive</SelectItem>
+                    <SelectItem value="trash">Trash</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
             </section>
 
-            <section className="skill-list" aria-label="Archived skills">
-              <div className="skill-table-scroll">
-                <div className="table-head archive-table-head" role="row">
-                  <SortableHeader label="Name" sortKey="name" sort={archiveSort} onSort={updateArchiveSort} />
-                  <SortableHeader label="Archived at" sortKey="archived_at" sort={archiveSort} onSort={updateArchiveSort} />
-                  <SortableHeader label="Archive path" sortKey="archive_path" sort={archiveSort} onSort={updateArchiveSort} />
-                  <SortableHeader label="Copy" sortKey="copy" sort={archiveSort} onSort={updateArchiveSort} />
-                  <span>Action</span>
-                </div>
+            <section className="skill-list codex-archive-list" aria-label="Archived Codex sessions">
+              <div className="skill-table-scroll codex-archive-scroll">
+                <Table className="codex-archive-table">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead><SortableHeader label="Title" sortKey="title" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead><SortableHeader label="Archived at" sortKey="archived_at" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead><SortableHeader label="Updated" sortKey="updated_at" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead><SortableHeader label="Workspace" sortKey="cwd" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead><SortableHeader label="Source" sortKey="source" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead><SortableHeader label="Size" sortKey="size" sort={archiveSort} onSort={updateArchiveSort} /></TableHead>
+                      <TableHead className="action-cell">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loading ? <SkeletonRows columns={7} /> : null}
 
-                {loading ? <SkeletonRows /> : null}
+                    {!loading && filteredArchiveRows.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7}>
+                          <div className="empty-state">
+                            <h2>No archived sessions</h2>
+                            <p>{archiveState === "active" ? "Archived Codex sessions will appear here." : "Deleted archived sessions are kept here until restored."}</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : null}
 
-                {!loading && filteredArchiveRows.length === 0 ? (
-                  <div className="empty-state">
-                    <h2>No archived skills</h2>
-                    <p>When you archive a tracked skill, it appears here.</p>
-                  </div>
-                  ) : null}
-
-                {!loading &&
-                  archivePageRows.map((row) => (
-                    <div className="skill-row archive-row" key={`archive:${row.id}`} tabIndex={0}>
-                      <span className="skill-main">
-                        <strong>{row.name || row.id}</strong>
-                        <small>{row.id}</small>
-                      </span>
-                      <span>{formatArchiveDate(row.archivedAt)}</span>
-                      <code>{row.archivePath}</code>
-                      <ArchiveCopyBadge status={row.archiveCopyStatus} />
-                      <span className="row-actions">
-                        <ActionIconButton
-                          label={`Restore ${row.name || row.id}`}
-                          busy={busyId === restoreBusyId(row)}
-                          disabled={busyId !== null && busyId !== restoreBusyId(row)}
-                          icon={<RotateCcw size={14} aria-hidden="true" />}
-                          onClick={() => requestRestore(row)}
-                        />
-                      </span>
-                    </div>
-                  ))}
+                    {!loading &&
+                      archivePageRows.map((row) => (
+                        <TableRow
+                          className={archiveSession?.item.fileName === row.fileName ? "skill-row codex-archive-row selected" : "skill-row codex-archive-row"}
+                          key={archiveRowKey(row)}
+                          tabIndex={0}
+                          onClick={() => void openArchiveSession(row)}
+                          onKeyDown={(event) =>
+                            selectRowWithKeyboard(event, archiveRowKey(row), () => {
+                              void openArchiveSession(row);
+                            })
+                          }
+                        >
+                          <TableCell>
+                            <span className="skill-main archive-title-cell" title={`${row.title}\n${row.sessionId}`}>
+                              <strong>{row.title}</strong>
+                              <small>{shortSessionId(row.sessionId)}</small>
+                            </span>
+                          </TableCell>
+                          <TableCell><span className="skill-time">{formatArchiveDate(row.archivedAt)}</span></TableCell>
+                          <TableCell><span className="skill-time">{formatTimestamp(row.updatedAt)}</span></TableCell>
+                          <TableCell><span className="archive-cwd archive-workspace-cell" title={row.cwd ?? "Unknown workspace"}>{row.cwd ?? "Unknown"}</span></TableCell>
+                          <TableCell><span className="archive-cwd" title={row.sourceLabel}>{row.sourceLabel}</span></TableCell>
+                          <TableCell><span className="skill-time">{formatFileSize(row.fileSize)}</span></TableCell>
+                          <TableCell className="action-cell" onClick={(event) => event.stopPropagation()}>
+                            {archiveState === "active" ? (
+                              <ActionIconButton
+                                label={`Delete archived session ${row.title}`}
+                                busy={busyId === `archive-delete:${archiveRowKey(row)}`}
+                                disabled={busyId !== null && busyId !== `archive-delete:${archiveRowKey(row)}`}
+                                icon={<Trash2 size={14} aria-hidden="true" />}
+                                tone="danger"
+                                onClick={() => setPendingArchiveDelete(row)}
+                              />
+                            ) : (
+                              <ActionIconButton
+                                label={`Restore archived session ${row.title}`}
+                                busy={busyId === `archive-restore:${archiveRowKey(row)}`}
+                                disabled={busyId !== null && busyId !== `archive-restore:${archiveRowKey(row)}`}
+                                icon={<RotateCcw size={14} aria-hidden="true" />}
+                                onClick={() => void runArchiveSessionAction("restore", row)}
+                              />
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
               </div>
               <div className="pagination-bar" aria-label="Archived skill pagination">
                 <div className="pagination-summary">
@@ -1400,43 +1712,40 @@ export function App() {
                 </div>
                 <label className="page-size-select">
                   <span>Rows</span>
-                  <Select
-                    value={String(pageSize)}
-                    onChange={(event) => setPageSize(Number(event.target.value) as PageSize)}
-                    aria-label="Rows per page"
-                  >
-                    {pageSizes.map((size) => (
-                      <option key={size} value={size}>
-                        {size}
-                      </option>
-                    ))}
+                  <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value) as PageSize)}>
+                    <SelectTrigger aria-label="Rows per page">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {pageSizes.map((size) => (
+                        <SelectItem key={size} value={String(size)}>
+                          {size}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
                   </Select>
                 </label>
                 <div className="pagination-actions">
                   <Button
-                    variant="secondary"
+                    variant="outline"
                     size="icon"
                     type="button"
                     onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
                     disabled={loading || filteredArchiveRows.length === 0 || currentPageIndex === 0}
-                    aria-label="Previous page"
-                    title="Previous page"
                   >
-                    <ChevronLeft size={15} aria-hidden="true" />
+                    <ChevronLeft size={16} aria-hidden="true" />
+                    <span className="sr-only">Previous page</span>
                   </Button>
-                  <span className="pagination-page">
-                    Page {currentPageIndex + 1} / {pageCount}
-                  </span>
+                  <span className="pagination-page">Page {currentPageIndex + 1} / {pageCount}</span>
                   <Button
-                    variant="secondary"
+                    variant="outline"
                     size="icon"
                     type="button"
                     onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))}
                     disabled={loading || filteredArchiveRows.length === 0 || currentPageIndex >= pageCount - 1}
-                    aria-label="Next page"
-                    title="Next page"
                   >
-                    <ChevronRight size={15} aria-hidden="true" />
+                    <ChevronRight size={16} aria-hidden="true" />
+                    <span className="sr-only">Next page</span>
                   </Button>
                 </div>
               </div>
@@ -1447,6 +1756,16 @@ export function App() {
 
       {configured && activeView === "skills" && detailOpen && selected ? (
         <DetailDrawer selected={selected} onClose={() => setDetailOpen(false)} />
+      ) : null}
+
+      {configured && activeView === "archive" && archiveDetailOpen && archiveSession ? (
+        <CodexArchiveDrawer
+          preview={archiveSession}
+          busyId={busyId}
+          onClose={() => setArchiveDetailOpen(false)}
+          onDelete={(row) => setPendingArchiveDelete(row)}
+          onRestore={(row) => void runArchiveSessionAction("restore", row)}
+        />
       ) : null}
 
       {configured && activeView === "skills" && editorState && editorRow ? (
@@ -1469,6 +1788,13 @@ export function App() {
         onConfirm={() => void confirmPendingAction()}
       />
 
+      <ArchiveDeleteDialog
+        row={pendingArchiveDelete}
+        busyId={busyId}
+        onClose={() => setPendingArchiveDelete(null)}
+        onConfirm={() => void confirmArchiveDelete()}
+      />
+
       <EditSourceDialog
         row={pendingEditRow}
         busyId={busyId}
@@ -1486,171 +1812,18 @@ export function App() {
         onAcceptVersion={runCompareVersionResolution}
       />
 
-      <RestoreArchiveDialog
-        row={pendingRestore}
+      <RepoConflictsDialog
+        state={repoConflictState}
         busyId={busyId}
-        onClose={() => setPendingRestore(null)}
-        onConfirm={() => void confirmPendingRestore()}
+        onClose={() => setRepoConflictState(null)}
+        onSelect={(skillId, source) => {
+          setRepoConflictState((current) =>
+            current ? { ...current, selections: { ...current.selections, [skillId]: source } } : current
+          );
+        }}
+        onResolve={() => void resolveRepoConflicts()}
       />
-    </div>
-  );
-}
 
-function SettingsPanel({
-  paths,
-  busyId,
-  selectingPath,
-  onPathChange,
-  onChoose,
-  onSave
-}: {
-  paths: SetupPaths;
-  busyId: string | null;
-  selectingPath: SetupPathField | null;
-  onPathChange: (field: keyof SetupPaths, value: string) => void;
-  onChoose: (field: keyof SetupPaths, title: string) => void;
-  onSave: () => void;
-}) {
-  const saving = busyId === "save-config";
-
-  return (
-    <Card className="settings-panel" aria-labelledby="settings-title">
-      <CardHeader className="settings-head">
-        <div>
-          <p className="eyebrow">Local configuration</p>
-          <CardTitle id="settings-title">Paths</CardTitle>
-        </div>
-        <Button variant="primary" type="button" onClick={onSave} disabled={saving}>
-          {saving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <FolderGit2 size={15} aria-hidden="true" />}
-          Save paths
-        </Button>
-      </CardHeader>
-
-      <CardContent className="settings-paths">
-        <PathSetting
-          title="Git sync repository"
-          body="Tracked by Git. Skills, metadata, and future sync commits live here."
-          input={
-            <PathInput
-              id="settings-sync-repo-path"
-              label="Path"
-              value={paths.syncRepo}
-              onChange={(value) => onPathChange("syncRepo", value)}
-              onChoose={() => onChoose("syncRepo", "Choose a sync repository directory")}
-              choosing={selectingPath === "syncRepo"}
-            />
-          }
-        />
-        <details className="advanced-settings">
-          <summary>Advanced local paths</summary>
-          <div className="advanced-settings-body">
-            <PathSetting
-              title="Codex skills directory"
-              body="Local Codex skills on this machine. Usually ~/.codex/skills."
-              input={
-                <PathInput
-                  id="settings-codex-skills-path"
-                  label="Path"
-                  value={paths.codexSkillsDir}
-                  onChange={(value) => onPathChange("codexSkillsDir", value)}
-                  onChoose={() => onChoose("codexSkillsDir", "Choose a Codex skills directory")}
-                  choosing={selectingPath === "codexSkillsDir"}
-                />
-              }
-            />
-            <PathSetting
-              title="Agents skills directory"
-              body="Local skills used by the agents skill system. Usually ~/.agents/skills."
-              input={
-                <PathInput
-                  id="settings-agents-skills-path"
-                  label="Path"
-                  value={paths.agentsSkillsDir}
-                  onChange={(value) => onPathChange("agentsSkillsDir", value)}
-                  onChoose={() => onChoose("agentsSkillsDir", "Choose an Agents skills directory")}
-                  choosing={selectingPath === "agentsSkillsDir"}
-                />
-              }
-            />
-            <PathSetting
-              title="Local cache directory"
-              body="Local-only app state. Defaults to ~/.codex-skill-manager/cache and is never meant for Git sync."
-              input={
-                <PathInput
-                  id="settings-cache-path"
-                  label="Path"
-                  value={paths.cacheDir}
-                  onChange={(value) => onPathChange("cacheDir", value)}
-                  onChoose={() => onChoose("cacheDir", "Choose a local cache directory")}
-                  choosing={selectingPath === "cacheDir"}
-                />
-              }
-            />
-          </div>
-        </details>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ReadOnlyCode({ value }: { value: string }) {
-  return <code className="readonly-code">{value}</code>;
-}
-
-function PathSetting({ title, body, input }: { title: string; body: string; input: ReactNode }) {
-  return (
-    <div className="path-setting">
-      <div>
-        <h3>{title}</h3>
-        <p>{body}</p>
-      </div>
-      {input}
-    </div>
-  );
-}
-
-function PathInput({
-  id,
-  label,
-  value,
-  onChange,
-  onChoose,
-  choosing,
-  placeholder
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  onChoose: () => void;
-  choosing: boolean;
-  placeholder?: string;
-}) {
-  return (
-    <div className="path-input">
-      <label htmlFor={id}>{label}</label>
-      <div className="path-input-row">
-        <Input
-          id={id}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={placeholder}
-          spellCheck={false}
-        />
-        <Button className="button secondary path-choose" variant="secondary" size="sm" type="button" onClick={onChoose} disabled={choosing}>
-          {choosing ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <FolderOpen size={14} aria-hidden="true" />}
-          Choose
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function PathSummary({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="path-summary">
-      <span>{label}</span>
-      <code>{value}</code>
     </div>
   );
 }
@@ -1671,8 +1844,13 @@ function SortableHeader<TSortKey extends string>({
   const Icon = active ? (sort.direction === "asc" ? ChevronUp : ChevronDown) : ArrowUpDown;
 
   return (
-    <span className="sortable-head" role="columnheader" aria-sort={ariaSort}>
-      <button className={active ? "table-sort-button active" : "table-sort-button"} type="button" onClick={() => onSort(sortKey)}>
+    <span className="sortable-head" data-sort={ariaSort}>
+      <button
+        className={active ? "table-sort-button active" : "table-sort-button"}
+        type="button"
+        onClick={() => onSort(sortKey)}
+        aria-label={`Sort by ${label}`}
+      >
         <span>{label}</span>
         <Icon size={13} aria-hidden="true" />
       </button>
@@ -1689,37 +1867,14 @@ function SelectAllCheckbox({
   mixed: boolean;
   onChange: (checked: boolean) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.indeterminate = mixed;
-    }
-  }, [mixed]);
-
   return (
     <Checkbox
-      ref={inputRef}
-      checked={checked}
+      checked={mixed ? "indeterminate" : checked}
       onChange={(event) => onChange(event.target.checked)}
       aria-label="Select visible skills"
       aria-checked={mixed ? "mixed" : checked}
     />
   );
-}
-
-function buildArchiveRows(report: StatusReport): ArchiveRow[] {
-  return report.archived
-    .map((skill) => ({
-      id: skill.id,
-      name: skill.name,
-      description: skill.description,
-      archivedAt: skill.archivedAt,
-      archivePath: skill.archivePath ?? `${report.syncRepo}/archive/${skill.id}`,
-      archiveCopyStatus: skill.archiveCopyStatus ?? "missing",
-      status: "archived" as const
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function buildRows(report: StatusReport): SkillRow[] {
@@ -1858,6 +2013,10 @@ function rowKey(row: SkillRow) {
   return `${row.kind}:${row.id}`;
 }
 
+function archiveRowKey(row: CodexArchiveSession | CodexArchiveRow) {
+  return `${"state" in row ? row.state : "active"}:${row.fileName}`;
+}
+
 function canAddToSync(row: SkillRow) {
   return row.kind === "unmanaged";
 }
@@ -1878,7 +2037,7 @@ function canEditLocal(row: SkillRow) {
   return row.installed && row.localSources.length > 0;
 }
 
-function canArchive(row: SkillRow) {
+function canStopSyncing(row: SkillRow) {
   return row.kind === "managed";
 }
 
@@ -1927,12 +2086,8 @@ function compareResolveBusyId(row: SkillRow, strategy: ResolveStrategy) {
   return `compare-resolve:${rowKey(row)}:${strategy}`;
 }
 
-function restoreBusyId(row: ArchiveRow) {
-  return `restore:${row.id}`;
-}
-
 function requiresConfirmation(endpoint: SkillActionEndpoint) {
-  return endpoint === "archive" || endpoint === "remove-local";
+  return endpoint === "stop-syncing" || endpoint === "remove-local";
 }
 
 function StatusTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "good" | "risk" }) {
@@ -2018,17 +2173,6 @@ function SyncBadge({ state }: { state: SkillRow["syncState"] }) {
   );
 }
 
-function ArchiveCopyBadge({ status }: { status: ArchiveCopyStatus }) {
-  const variant: "success" | "destructive" = status === "present" ? "success" : "destructive";
-  const label = status === "present" ? "Present" : "Missing";
-
-  return (
-    <Badge variant={variant} className={`archive-copy-badge ${status}`}>
-      {label}
-    </Badge>
-  );
-}
-
 function AutoSyncIndicator({ status }: { status: AutoSyncStatus }) {
   const text = formatAutoSyncLabel(status);
   const isActive = status.enabled;
@@ -2043,15 +2187,28 @@ function AutoSyncIndicator({ status }: { status: AutoSyncStatus }) {
   );
 }
 
-function BranchSyncBadge({ status }: { status: GitBranchSyncStatus }) {
+function BranchSyncBadge({ status, busy, onReview }: { status: GitBranchSyncStatus; busy?: boolean; onReview?: () => void }) {
   const label = branchSyncLabel(status);
   const needsAttention = status.state === "ahead" || status.state === "behind" || status.state === "diverged";
   const className = `branch-sync-badge ${status.state}${needsAttention ? " attention" : ""}`;
+  const content = (
+    <>
+      {busy ? <Loader2 className="spin" size={13} aria-hidden="true" /> : needsAttention ? <CircleAlert size={13} aria-hidden="true" /> : <CheckCircle2 size={13} aria-hidden="true" />}
+      {label}
+    </>
+  );
+
+  if (onReview) {
+    return (
+      <button className={`${className} branch-sync-button`} title="Review repo conflicts" type="button" onClick={onReview} disabled={busy}>
+        {content}
+      </button>
+    );
+  }
 
   return (
     <span className={className} title={branchSyncTitle(status)} role="status" aria-live="polite">
-      {needsAttention ? <CircleAlert size={13} aria-hidden="true" /> : <CheckCircle2 size={13} aria-hidden="true" />}
-      {label}
+      {content}
     </span>
   );
 }
@@ -2072,7 +2229,7 @@ function RowAction({
   const importBusy = busyId === actionBusyId("import", row);
   const installBusy = busyId === actionBusyId("install", row);
   const updateBusy = busyId === actionBusyId("update-local", row);
-  const archiveBusy = busyId === actionBusyId("archive", row);
+  const stopSyncingBusy = busyId === actionBusyId("stop-syncing", row);
   const removeBusy = busyId === actionBusyId("remove-local", row);
   const editBusy = busyId === `editor-open:${rowKey(row)}`;
   const compareBusy = busyId === actionBusyId("compare", row);
@@ -2082,7 +2239,7 @@ function RowAction({
     canAddToSync(row) ||
     canInstallLocal(row) ||
     canUpdateLocal(row) ||
-    canArchive(row) ||
+    canStopSyncing(row) ||
     canRemoveLocal(row);
 
   if (!hasAction) {
@@ -2136,13 +2293,13 @@ function RowAction({
           onClick={() => onCompare(row)}
         />
       ) : null}
-      {canArchive(row) ? (
+      {canStopSyncing(row) ? (
         <ActionIconButton
           label="Stop syncing"
-          busy={archiveBusy}
-          disabled={busyId !== null && !archiveBusy}
-          icon={<Archive size={14} aria-hidden="true" />}
-          onClick={() => onAction("archive", row)}
+          busy={stopSyncingBusy}
+          disabled={busyId !== null && !stopSyncingBusy}
+          icon={<Unlink2 size={14} aria-hidden="true" />}
+          onClick={() => onAction("stop-syncing", row)}
         />
       ) : null}
       {canRemoveLocal(row) ? (
@@ -2175,23 +2332,28 @@ function ActionIconButton({
   onClick: () => void;
 }) {
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className={`row-action icon-only${tone ? ` ${tone}` : ""}`}
-      type="button"
-      aria-label={label}
-      title={label}
-      data-tooltip={label}
-      onClick={(event) => {
-        event.stopPropagation();
-        onClick();
-      }}
-      disabled={disabled}
-    >
-      {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : icon}
-      <span className="sr-only">{label}</span>
-    </Button>
+    <TooltipProvider delayDuration={250}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`row-action icon-only${tone ? ` ${tone}` : ""}`}
+            type="button"
+            aria-label={label}
+            onClick={(event) => {
+              event.stopPropagation();
+              onClick();
+            }}
+            disabled={disabled}
+          >
+            {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : icon}
+            <span className="sr-only">{label}</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -2343,6 +2505,116 @@ function CompareVersionsDialog({
   );
 }
 
+function RepoConflictsDialog({
+  state,
+  busyId,
+  onClose,
+  onSelect,
+  onResolve
+}: {
+  state: { conflicts: RepoSkillConflict[]; selections: Record<string, RepoConflictSource> } | null;
+  busyId: string | null;
+  onClose: () => void;
+  onSelect: (skillId: string, source: RepoConflictSource) => void;
+  onResolve: () => void;
+}) {
+  const busy = busyId !== null && state !== null;
+  const resolving = busyId === "repo-conflicts-resolve";
+  const conflictCount = state?.conflicts.length ?? 0;
+
+  return (
+    <Dialog
+      open={Boolean(state)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {state ? (
+          <DialogContent className="confirm-dialog compare-dialog repo-conflict-dialog" aria-labelledby="repo-conflicts-title" aria-describedby="repo-conflicts-description">
+            <DialogHeader className="compare-header">
+              <div className="confirm-icon" aria-hidden="true">
+                <GitCompareArrows size={16} />
+              </div>
+              <div>
+                <DialogTitle id="repo-conflicts-title">Review repo conflicts</DialogTitle>
+                <DialogDescription id="repo-conflicts-description">
+                  Choose the canonical version for each conflicted skill. System metadata is merged automatically.
+                </DialogDescription>
+              </div>
+            </DialogHeader>
+            <div className="repo-conflict-stack">
+              {state.conflicts.map((conflict) => {
+                const selectedSource = state.selections[conflict.skillId];
+                return (
+                  <section className="repo-conflict-card" key={conflict.skillId}>
+                    <div className="repo-conflict-card-head">
+                      <div>
+                        <h3>{conflict.skillId}</h3>
+                        <p>{conflict.files.length} conflicted file{conflict.files.length === 1 ? "" : "s"}</p>
+                      </div>
+                      <Badge variant="destructive">Needs choice</Badge>
+                    </div>
+                    <div className="repo-conflict-files">
+                      {conflict.files.slice(0, 4).map((filePath) => (
+                        <code key={filePath}>{filePath}</code>
+                      ))}
+                      {conflict.files.length > 4 ? <span>+{conflict.files.length - 4} more</span> : null}
+                    </div>
+                    <div className="compare-source-grid">
+                      {conflict.versions.map((version) => {
+                        const selected = selectedSource === version.source;
+                        return (
+                          <section className={`compare-source repo-version-card${selected ? " selected" : ""}`} key={version.source}>
+                            <div className="compare-source-title">
+                              <strong>{repoConflictSourceLabel(version.source)}</strong>
+                              <span>{version.exists ? (selected ? "Selected" : "Available") : "Missing"}</span>
+                            </div>
+                            <p className="compare-source-path">{version.path}</p>
+                            <pre className="compare-source-content">
+                              <code>{version.content ?? "No SKILL.md present in this source."}</code>
+                            </pre>
+                            <div className="compare-source-actions">
+                              <Button
+                                variant={selected ? "default" : "secondary"}
+                                size="sm"
+                                type="button"
+                                onClick={() => onSelect(conflict.skillId, version.source)}
+                                disabled={busy || !version.exists}
+                                title={version.exists ? `Use ${repoConflictSourceLabel(version.source)} for ${conflict.skillId}` : `${version.label} is missing`}
+                              >
+                                <CheckCircle2 size={14} aria-hidden="true" />
+                                Use this version
+                              </Button>
+                            </div>
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+            <DialogFooter className="compare-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                <X size={15} aria-hidden="true" />
+                Cancel
+              </Button>
+              <Button type="button" onClick={onResolve} disabled={busy || conflictCount === 0}>
+                {resolving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <GitCompareArrows size={15} aria-hidden="true" />}
+                Resolve and push
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
 function ConfirmActionDialog({
   action,
   busyId,
@@ -2403,85 +2675,20 @@ function ConfirmActionDialog({
   );
 }
 
-function RestoreArchiveDialog({
-  row,
-  busyId,
-  onClose,
-  onConfirm
-}: {
-  row: ArchiveRow | null;
-  busyId: string | null;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  const busy = row ? busyId === restoreBusyId(row) : false;
-
-  return (
-    <Dialog
-      open={Boolean(row)}
-      onOpenChange={(open) => {
-        if (!open && !busy) {
-          onClose();
-        }
-      }}
-    >
-      <DialogPortal>
-        <DialogOverlay />
-        {row ? (
-          <DialogContent
-            className="confirm-dialog"
-            aria-labelledby="restore-archive-title"
-            aria-describedby="restore-archive-description"
-          >
-            <DialogHeader className="confirm-dialog-header">
-              <div className="confirm-icon" aria-hidden="true">
-                <RotateCcw size={16} />
-              </div>
-              <div>
-                <DialogTitle id="restore-archive-title">Restore {row.name || row.id}?</DialogTitle>
-                <DialogDescription id="restore-archive-description">This moves the archived skill copy back into the active skills folder.</DialogDescription>
-              </div>
-            </DialogHeader>
-            <div className="confirm-scope" aria-label="Restore scope">
-              <div className="confirm-scope-item">
-                <span>Archive copy</span>
-                <strong>{row.archivePath}</strong>
-              </div>
-              <div className="confirm-scope-item">
-                <span>Archived at</span>
-                <strong>{formatArchiveDate(row.archivedAt)}</strong>
-              </div>
-            </div>
-            <DialogFooter className="confirm-dialog-footer">
-              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
-                Cancel
-              </Button>
-              <Button variant="primary" type="button" onClick={onConfirm} disabled={busy}>
-                {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
-                Restore
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        ) : null}
-      </DialogPortal>
-    </Dialog>
-  );
-}
-
 function confirmDialogCopy(endpoint: SkillActionEndpoint, row: SkillRow) {
   const skillName = row.name || row.id;
-  if (endpoint === "archive") {
+  if (endpoint === "stop-syncing") {
     return {
       title: `Stop syncing ${skillName}?`,
       description:
-        "This removes the skill from the active sync set. The installed local copy stays available on this machine.",
+        "This deletes the synced repository copy and metadata record. Installed local copies stay available on this machine.",
       confirmLabel: "Stop syncing",
-      icon: <Archive size={16} aria-hidden="true" />,
-      danger: false,
+      icon: <Unlink2 size={16} aria-hidden="true" />,
+      danger: true,
       scope: [
-        { label: "Local skill", value: "Kept installed" },
-        { label: "Sync repo", value: "No longer active" },
-        { label: "GitHub", value: "Updated with the archive sync" }
+        { label: "Local copies", value: "Kept installed" },
+        { label: "Sync repo", value: "Delete repo/skills copy and metadata" },
+        { label: "Git remote", value: "Commit and push the removal" }
       ]
     };
   }
@@ -2498,9 +2705,62 @@ function confirmDialogCopy(endpoint: SkillActionEndpoint, row: SkillRow) {
     scope: [
       { label: "This machine", value: multipleLocalCopies ? "Delete Codex and Agents copies" : "Delete local folder" },
       { label: "Sync repo", value: "Leave unchanged" },
-      { label: "Git remote", value: "No archive action" }
+      { label: "Git remote", value: "No sync state change" }
     ]
   };
+}
+
+function ArchiveDeleteDialog({
+  row,
+  busyId,
+  onClose,
+  onConfirm
+}: {
+  row: CodexArchiveRow | null;
+  busyId: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const busy = row ? busyId === `archive-delete:${archiveRowKey(row)}` : false;
+
+  return (
+    <Dialog
+      open={Boolean(row)}
+      onOpenChange={(open) => {
+        if (!open && !busy) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay />
+        {row ? (
+          <DialogContent className="confirm-dialog" aria-labelledby="archive-delete-title" aria-describedby="archive-delete-description">
+            <DialogHeader className="confirm-dialog-header">
+              <div className="confirm-icon" aria-hidden="true">
+                <Trash2 size={16} />
+              </div>
+              <div>
+                <DialogTitle id="archive-delete-title">Delete archived session?</DialogTitle>
+                <DialogDescription id="archive-delete-description">
+                  This moves the archived session to Trash. You can restore it from the Trash view.
+                </DialogDescription>
+              </div>
+            </DialogHeader>
+            <DialogFooter className="confirm-dialog-footer">
+              <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="destructive" type="button" onClick={onConfirm} disabled={busy}>
+                {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </DialogPortal>
+    </Dialog>
+  );
 }
 
 function DetailDrawer({
@@ -2517,7 +2777,7 @@ function DetailDrawer({
           <div className="drawer-title-row">
             <div>
               <p className="eyebrow">{kindLabel(selected.kind)}</p>
-              <h2>{selected.name || selected.id}</h2>
+              <SheetTitle>{selected.name || selected.id}</SheetTitle>
             </div>
             <Button className="icon-button" variant="outline" size="icon" type="button" onClick={onClose} aria-label="Close details">
               <X size={18} aria-hidden="true" />
@@ -2554,6 +2814,92 @@ function DetailDrawer({
   );
 }
 
+function CodexArchiveDrawer({
+  preview,
+  busyId,
+  onClose,
+  onDelete,
+  onRestore
+}: {
+  preview: CodexArchivePreviewResponse;
+  busyId: string | null;
+  onClose: () => void;
+  onDelete: (row: CodexArchiveRow) => void;
+  onRestore: (row: CodexArchiveRow) => void;
+}) {
+  const row: CodexArchiveRow = {
+    ...preview.item,
+    state: preview.state,
+    sourceLabel: preview.item.source || "Unknown"
+  };
+  const action = preview.state === "active" ? "delete" : "restore";
+  const actionBusyId = `archive-${action}:${archiveRowKey(row)}`;
+  const busy = busyId === actionBusyId;
+
+  return (
+    <Sheet open={true} onOpenChange={onClose}>
+      <SheetContent className="detail-drawer codex-archive-drawer">
+        <SheetHeader>
+          <div className="drawer-title-row">
+            <div>
+              <p className="eyebrow">{preview.state === "active" ? "Archived session" : "Archive trash"}</p>
+              <SheetTitle>{row.title}</SheetTitle>
+            </div>
+            <Button className="icon-button" variant="outline" size="icon" type="button" onClick={onClose} aria-label="Close archived session">
+              <X size={18} aria-hidden="true" />
+            </Button>
+          </div>
+          <p>{row.sessionId}</p>
+          <div className="drawer-badges">
+            <span className={`source-badge repo`}>{row.sourceLabel}</span>
+            <Badge variant={preview.state === "active" ? "success" : "warning"}>{preview.state === "active" ? "Active archive" : "Trash"}</Badge>
+          </div>
+        </SheetHeader>
+
+        <div className="detail-metadata" aria-label="Archived session summary">
+          <DetailField label="Archived" value={formatArchiveDate(row.archivedAt)} />
+          <DetailField label="Updated" value={formatTimestamp(row.updatedAt)} />
+          <DetailField label="Source" value={row.sourceLabel} />
+          <DetailField label="File size" value={formatFileSize(row.fileSize)} />
+        </div>
+
+        <div className="detail-section">
+          <h3>Metadata</h3>
+          <KeyValue label="File" value={row.fileName} />
+          <KeyValue label="Session id" value={row.sessionId} />
+          <KeyValue label="Workspace" value={row.cwd ?? "Unknown"} />
+        </div>
+
+        <div className="detail-section">
+          <h3>Preview</h3>
+          <pre className="archive-preview">
+            <code>{preview.preview.join("\n") || "No preview available."}</code>
+          </pre>
+          {preview.truncated ? <p className="preview-note">Preview is truncated. Full session content is not loaded by default.</p> : null}
+        </div>
+
+        <div className="editor-footer">
+          {preview.state === "active" ? (
+            <Button variant="destructive" type="button" onClick={() => onDelete(row)} disabled={busyId !== null && !busy}>
+              {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+              Delete
+            </Button>
+          ) : (
+            <Button variant="primary" type="button" onClick={() => onRestore(row)} disabled={busyId !== null && !busy}>
+              {busy ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
+              Restore
+            </Button>
+          )}
+          <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
+            <X size={15} aria-hidden="true" />
+            Close
+          </Button>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function SkillEditorDrawer({
   row,
   editorState,
@@ -2578,7 +2924,7 @@ function SkillEditorDrawer({
           <div className="drawer-title-row">
             <div>
               <p className="eyebrow">Local editor</p>
-              <h2>Edit SKILL.md</h2>
+              <SheetTitle>Edit SKILL.md</SheetTitle>
             </div>
             <Button className="icon-button" variant="outline" size="icon" type="button" onClick={onClose} aria-label="Close editor" disabled={saving}>
               <X size={18} aria-hidden="true" />
@@ -2647,13 +2993,17 @@ function KeyValue({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SkeletonRows() {
+function SkeletonRows({ columns }: { columns: number }) {
   return (
-    <div className="skeleton-stack" aria-label="Loading skills">
+    <>
       {Array.from({ length: 9 }).map((_, index) => (
-        <div className="skeleton-row" key={index} />
+        <TableRow className="skeleton-row" key={index} aria-hidden="true">
+          <TableCell colSpan={columns}>
+            <Skeleton className="skeleton-line" />
+          </TableCell>
+        </TableRow>
       ))}
-    </div>
+    </>
   );
 }
 
@@ -2665,7 +3015,7 @@ function filterLabel(filter: Filter) {
 function viewTitle(view: View) {
   const titles: Record<View, string> = {
     skills: "Skills",
-    archive: "Archive",
+    archive: "Codex Archive",
     settings: "Settings"
   };
 
@@ -2682,6 +3032,7 @@ function viewFromLocation(): View {
 
 function viewFromPath(pathname: string): View {
   switch (normalizeRoutePath(pathname)) {
+    case "/codex-archive":
     case "/archive":
       return "archive";
     case "/settings":
@@ -2754,24 +3105,30 @@ function compareSkillRows(a: SkillRow, b: SkillRow, sort: SortState<SkillSortKey
   return result || compareRowNames(a, b, "asc");
 }
 
-function compareArchiveRows(a: ArchiveRow, b: ArchiveRow, sort: SortState<ArchiveSortKey>) {
+function compareArchiveRows(a: CodexArchiveRow, b: CodexArchiveRow, sort: SortState<ArchiveSortKey>) {
   let result = 0;
   switch (sort.key) {
-    case "name":
-      result = compareNamedRecords(a, b, sort.direction);
+    case "title":
+      result = compareTextValues(a.title, b.title, sort.direction);
       break;
     case "archived_at":
       result = compareTimestampValues(a.archivedAt, b.archivedAt, sort.direction);
       break;
-    case "archive_path":
-      result = compareTextValues(a.archivePath, b.archivePath, sort.direction);
+    case "updated_at":
+      result = compareTimestampValues(a.updatedAt, b.updatedAt, sort.direction);
       break;
-    case "copy":
-      result = compareTextValues(a.archiveCopyStatus, b.archiveCopyStatus, sort.direction);
+    case "cwd":
+      result = compareTextValues(a.cwd ?? "", b.cwd ?? "", sort.direction);
+      break;
+    case "source":
+      result = compareTextValues(a.source ?? "", b.source ?? "", sort.direction);
+      break;
+    case "size":
+      result = sort.direction === "asc" ? a.fileSize - b.fileSize : b.fileSize - a.fileSize;
       break;
   }
 
-  return result || compareNamedRecords(a, b, "asc");
+  return result || compareTextValues(a.title, b.title, "asc") || compareTextValues(a.sessionId, b.sessionId, "asc");
 }
 
 function compareRowNames(a: SkillRow, b: SkillRow, direction: SortDirection) {
@@ -2871,15 +3228,15 @@ function branchSyncLabel(status: GitBranchSyncStatus) {
   }
 
   if (status.state === "ahead") {
-    return `Push pending ${status.ahead}`;
+    return `Push needed ${status.ahead}`;
   }
 
   if (status.state === "behind") {
-    return `Pull pending ${status.behind}`;
+    return `Remote changes ${status.behind}`;
   }
 
   if (status.state === "diverged") {
-    return `Diverged +${status.ahead}/-${status.behind}`;
+    return `Sync conflict +${status.ahead}/-${status.behind}`;
   }
 
   if (status.state === "no-upstream") {
@@ -2925,6 +3282,17 @@ function sourceLabel(source: SkillRow["source"]) {
   return labels[source];
 }
 
+function repoConflictSourceLabel(source: RepoConflictSource) {
+  const labels: Record<RepoConflictSource, string> = {
+    github: "GitHub version",
+    syncRepo: "Sync repo local",
+    codex: "Codex installed copy",
+    agents: "Agents installed copy"
+  };
+
+  return labels[source];
+}
+
 function localPathForSource(row: SkillRow, source: LocalSkillSource) {
   const prefix = `${sourceLabel(source)}: `;
   const matchingLine = row.localPath?.split("\n").find((line) => line.startsWith(prefix));
@@ -2947,6 +3315,26 @@ function kindLabel(kind: SkillRow["kind"]) {
 
 function shortHash(hash: string | null) {
   return hash ? hash.slice(0, 12) : "None";
+}
+
+function shortSessionId(sessionId: string) {
+  return sessionId.length > 18 ? `${sessionId.slice(0, 8)}…${sessionId.slice(-6)}` : sessionId;
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function formatTimestamp(value: string | null) {
@@ -3014,7 +3402,7 @@ async function readError(response: Response) {
   }
 }
 
-function selectRowWithKeyboard(event: KeyboardEvent<HTMLDivElement>, id: string, setSelectedId: (id: string) => void) {
+function selectRowWithKeyboard(event: KeyboardEvent<HTMLElement>, id: string, setSelectedId: (id: string) => void) {
   if (event.key !== "Enter" && event.key !== " ") {
     return;
   }

@@ -1,9 +1,5 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
-import type { ArchiveCopyStatus, LocalConfig, ScannedSkill, SkillRecord, StatusReport, SyncState } from "./types.js";
-import { hashDirectory } from "./hash.js";
-import { readSkillFrontmatter } from "./frontmatter.js";
-import { repoArchiveDir, repoSkillsDir } from "./paths.js";
+import type { LocalConfig, ScannedSkill, SkillRecord, StatusReport, SyncState } from "./types.js";
+import { repoSkillsDir } from "./paths.js";
 import { readSkillsMetadata } from "./metadata.js";
 import { scanSkills } from "./scanner.js";
 import { getLastUsageBySkill } from "./usage.js";
@@ -20,10 +16,6 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
   const managedIds = new Set(managedRecords.map((skill) => skill.id));
   const allSkillIds = uniqueSkillIds([...managedRecords, ...localSkills, ...repoSkills].map((skill) => skill.id));
   const lastUsedBySkill = await getLastUsageBySkill(config.syncRepo, allSkillIds);
-  const archivedRecords = metadata.skills.filter((skill) => skill.status === "archived");
-  const archived = (await Promise.all(archivedRecords.map((record) => enrichArchivedRecord(config.syncRepo, record)))).sort((a, b) =>
-    a.id.localeCompare(b.id)
-  );
 
   const managed = managedRecords.map((record) => {
     const localCandidates = localById.get(record.id) ?? [];
@@ -44,8 +36,7 @@ export async function buildStatusReport(config: LocalConfig): Promise<StatusRepo
     agentsSkillsDir: config.agentsSkillsDir,
     managed,
     unmanagedLocal,
-    repoOnly,
-    archived
+    repoOnly
   };
 }
 
@@ -182,49 +173,4 @@ export function deriveSyncState(
   }
 
   return "clean";
-}
-
-async function enrichArchivedRecord(syncRepo: string, record: SkillRecord): Promise<SkillRecord> {
-  const archivePath = path.join(repoArchiveDir(syncRepo), record.id);
-  const skillFilePath = path.join(archivePath, "SKILL.md");
-
-  if (!existsSync(archivePath) || !existsSync(skillFilePath)) {
-    return {
-      ...record,
-      archivePath,
-      archiveCopyStatus: "missing" as ArchiveCopyStatus,
-      archiveHash: null,
-      currentRepoHash: null,
-      status: "archived",
-      syncState: "missing_local"
-    };
-  }
-
-  const archiveFrontmatter = await readSkillFrontmatter(archivePath);
-  const archiveHash = await safeHash(archivePath);
-
-  return {
-    ...record,
-    status: "archived",
-    name: archiveFrontmatter.name || record.name,
-    description: archiveFrontmatter.description || record.description,
-    archivePath,
-    archiveCopyStatus: "present" as ArchiveCopyStatus,
-    archiveHash,
-    currentRepoHash: archiveHash,
-    syncState: "missing_local",
-    installed: record.installed ?? false,
-    localSources: [],
-    localCopiesDiffer: false,
-    localModifiedAt: record.localModifiedAt ?? null,
-    currentLocalHash: record.currentLocalHash ?? null
-  };
-}
-
-async function safeHash(skillDirectory: string): Promise<string | null> {
-  try {
-    return await hashDirectory(skillDirectory);
-  } catch {
-    return null;
-  }
 }

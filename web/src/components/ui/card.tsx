@@ -1,23 +1,32 @@
 import * as React from "react";
 import { cn } from "../../lib/utils";
 
-export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <section className={cn("card", className)} {...props} />;
-}
+export const Card = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement>>(({ className, ...props }, ref) => {
+  return <section ref={ref} className={cn("card", className)} {...props} />;
+});
 
-export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("card-header", className)} {...props} />;
-}
+Card.displayName = "Card";
 
-export function CardTitle({ className, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn("card-title", className)} {...props} />;
-}
+export const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(({ className, ...props }, ref) => {
+  return <div ref={ref} className={cn("card-header", className)} {...props} />;
+});
 
-export function CardDescription({ className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cn("card-description", className)} {...props} />;
-}
+CardHeader.displayName = "CardHeader";
 
-export function CardContent({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("card-content", className)} {...props} />;
-}
+export const CardTitle = React.forwardRef<HTMLHeadingElement, React.HTMLAttributes<HTMLHeadingElement>>(({ className, ...props }, ref) => {
+  return <h2 ref={ref} className={cn("card-title", className)} {...props} />;
+});
 
+CardTitle.displayName = "CardTitle";
+
+export const CardDescription = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLParagraphElement>>(({ className, ...props }, ref) => {
+  return <p ref={ref} className={cn("card-description", className)} {...props} />;
+});
+
+CardDescription.displayName = "CardDescription";
+
+export const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(({ className, ...props }, ref) => {
+  return <div ref={ref} className={cn("card-content", className)} {...props} />;
+});
+
+CardContent.displayName = "CardContent";

@@ -40,7 +40,6 @@ describe("updateLocalSkill", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
     await writeSkillsMetadata(config.syncRepo, { schemaVersion: 1, skills: [record] });
 

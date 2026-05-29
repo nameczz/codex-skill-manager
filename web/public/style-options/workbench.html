@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Style 01, Quiet Workbench</title>
+    <link rel="stylesheet" href="./common.css" />
+    <style>
+      :root {
+        --page: oklch(0.968 0.008 248);
+        --sidebar: oklch(0.985 0.005 248);
+        --panel: oklch(0.994 0.004 248);
+        --panel-2: oklch(0.944 0.011 248);
+        --control: oklch(0.98 0.006 248);
+        --accent: oklch(0.48 0.15 245);
+        --accent-soft: oklch(0.92 0.045 245);
+        --table-head: oklch(0.936 0.012 248);
+      }
+
+      .option-sidebar {
+        box-shadow: 12px 0 34px oklch(0.45 0.02 248 / 0.06);
+      }
+
+      .row:hover,
+      .archive-row:hover {
+        background: oklch(0.965 0.009 248);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="option-shell">
+      <aside class="option-sidebar">
+        <div class="brand">
+          <div class="brand-mark">CS</div>
+          <div>
+            <strong>Skill Manager</strong>
+            <span>Local sync workbench</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="active" href="#">Skills <span>128</span></a>
+          <a href="#">Codex Archive <span>10</span></a>
+          <a href="#">Settings</a>
+        </nav>
+      </aside>
+      <main class="main">
+        <div class="header">
+          <div class="title">
+            <div class="kicker">Codex Skill Manager</div>
+            <h1>Skills</h1>
+          </div>
+          <div class="actions">
+            <a class="button" href="./index.html">Options</a>
+            <button class="button">Refresh</button>
+            <button class="button primary">Remote synced</button>
+          </div>
+        </div>
+        <section class="status-grid">
+          <div class="tile"><span>Tracked</span><strong>13</strong></div>
+          <div class="tile"><span>In sync</span><strong style="color: var(--success)">13</strong></div>
+          <div class="tile"><span>Needs action</span><strong style="color: var(--danger)">115</strong></div>
+          <div class="path-panel">
+            <div class="path-row"><span>Sync repo</span><code>/Users/zilliz/working/czz-project/skills-sync</code></div>
+            <div class="path-row"><span>Codex skills</span><code>/Users/zilliz/.codex/skills</code></div>
+            <div class="path-row"><span>Agents skills</span><code>/Users/zilliz/.agents/skills</code></div>
+          </div>
+        </section>
+        <section class="toolbar">
+          <div class="control">Search skills</div>
+          <div class="control">State: All</div>
+          <div class="control">Rows: 20</div>
+        </section>
+        <section class="table-frame">
+          <div class="table-scroll">
+            <div class="table">
+              <div class="table-head">
+                <span></span><span>Name</span><span>Source</span><span>State</span><span>Local copy</span><span>Last used</span><span>Action</span>
+              </div>
+              <div class="row">
+                <div class="check"></div>
+                <div class="cell skill-name"><strong>acquisition-channel-advisor</strong><small>acquisition-channel-advisor</small></div>
+                <div class="cell"><span class="badge source">Codex + Agents</span></div>
+                <div class="cell"><span class="badge ok">In sync</span></div>
+                <div class="cell"><strong>Installed</strong></div>
+                <div class="cell time">Never</div>
+                <div class="row-actions"><button class="icon-button">E</button><button class="icon-button">S</button><button class="icon-button danger">D</button></div>
+              </div>
+              <div class="row">
+                <div class="check"></div>
+                <div class="cell skill-name"><strong>baoyu-comic</strong><small>baoyu-comic</small></div>
+                <div class="cell"><span class="badge source">Codex local</span></div>
+                <div class="cell"><span class="badge local">Local only</span></div>
+                <div class="cell"><strong>Installed</strong></div>
+                <div class="cell time">2026/5/28 11:28:58<br />47 minutes ago</div>
+                <div class="row-actions"><button class="icon-button">E</button><button class="icon-button">+</button><button class="icon-button danger">D</button></div>
+              </div>
+              <div class="row">
+                <div class="check"></div>
+                <div class="cell skill-name"><strong>spec-studio</strong><small>spec-studio</small></div>
+                <div class="cell"><span class="badge source">Codex local</span></div>
+                <div class="cell"><span class="badge ok">In sync</span></div>
+                <div class="cell"><strong>Installed</strong></div>
+                <div class="cell time">2026/5/29 09:42:12<br />12 minutes ago</div>
+                <div class="row-actions"><button class="icon-button">E</button><button class="icon-button">S</button><button class="icon-button danger">D</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

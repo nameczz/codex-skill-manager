@@ -47,8 +47,7 @@ export async function importLocalSkill(config: LocalConfig, skillId: string, opt
     currentLocalHash: hash,
     lastUsedAt: null,
     createdAt: now,
-    updatedAt: now,
-    archivedAt: null
+    updatedAt: now
   };
 
   await upsertSkillRecord(config.syncRepo, record);

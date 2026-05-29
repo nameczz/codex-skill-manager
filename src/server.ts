@@ -9,16 +9,31 @@ import { tryLoadLocalConfig } from "./config.js";
 import { initialize } from "./init.js";
 import { buildStatusReport } from "./status.js";
 import { selectDirectory, type DirectoryPicker } from "./directoryPicker.js";
-import { gitBranchSyncStatus, gitPull, gitStatus } from "./git.js";
+import { gitBranchSyncStatus, gitStatus } from "./git.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
-import { syncRepositoryChanges, syncSelectedSkills, type SyncSelection } from "./sync.js";
-import { archiveSkill } from "./archiveSkill.js";
+import {
+  listRepositoryConflicts,
+  pullRepositoryChanges,
+  resolveRepositoryConflicts,
+  syncRepositoryChanges,
+  syncSelectedSkills,
+  type RepositoryConflictResolution,
+  type RepositoryConflictSource,
+  type SyncSelection
+} from "./sync.js";
+import { stopSyncingSkill } from "./stopSyncingSkill.js";
 import { removeLocalSkill } from "./removeLocalSkill.js";
 import { recordUsageEvent } from "./usage.js";
 import { updateLocalSkill } from "./updateLocalSkill.js";
-import { restoreArchivedSkill } from "./restoreArchivedSkill.js";
 import { resolveConflict } from "./resolveConflict.js";
+import {
+  listCodexArchiveSessions,
+  previewCodexArchiveSession,
+  restoreCodexArchiveSession,
+  moveCodexArchiveSessionToTrash,
+  validateCodexArchiveFileName
+} from "./codexArchive.js";
 import { createAutoSyncController } from "./autoSync.js";
 import { createUsageMonitor } from "./usageMonitor.js";
 import {
@@ -68,6 +83,20 @@ type SkillVersionsBody = {
   skillId?: string;
 };
 
+type StopSyncingBody = {
+  skillId?: string;
+  source?: string;
+};
+
+type CodexArchiveStateQuery = {
+  state?: "active" | "trash";
+};
+
+type CodexArchiveActionBody = {
+  state?: "active" | "trash";
+  fileName?: string;
+};
+
 type ResolveConflictBody = {
   skillId?: string;
   strategy?: "codex" | "agents" | "repo";
@@ -84,6 +113,13 @@ type SkillVersionPayload = {
 
 type SkillVersionsPayload = {
   versions: SkillVersionPayload[];
+};
+
+type RepoConflictResolveBody = {
+  resolutions?: Array<{
+    skillId?: string;
+    source?: string;
+  }>;
 };
 
 type BulkActionBody = SyncBody & {
@@ -110,6 +146,10 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
   });
 
   app.get("/api/health", async () => ({ ok: true }));
+
+  app.get("/archive", async (_request, reply) => {
+    reply.redirect("/codex-archive", 302);
+  });
 
   app.get("/api/status", async () => {
     if (!config) {
@@ -242,20 +282,46 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
     return { versions };
   });
 
-  app.post<{ Body: SkillActionBody }>("/api/archive", async (request) => {
+  app.post<{ Body: StopSyncingBody }>("/api/stop-syncing", async (request) => {
     const loaded = requireConfig(config);
     const skillId = requireSkillId(request.body);
-    const record = await archiveSkill(loaded, skillId);
+    optionalLocalSource(request.body?.source);
+    const record = await stopSyncingSkill(loaded, skillId);
     const result = await syncRepositoryChanges(loaded);
     return { record, result };
   });
 
-  app.post<{ Body: SkillActionBody }>("/api/restore", async (request) => {
-    const loaded = requireConfig(config);
-    const skillId = requireSkillId(request.body);
-    const record = await restoreArchivedSkill(loaded, skillId);
-    const result = await syncRepositoryChanges(loaded);
-    return { record, result };
+  app.get<{ Querystring: CodexArchiveStateQuery }>("/api/codex-archive", async (request) => {
+    const state = request.query.state === "trash" ? "trash" : "active";
+    const payload = await listCodexArchiveSessions(state);
+    return payload;
+  });
+
+  app.post<{ Body: CodexArchiveActionBody }>("/api/codex-archive/preview", async (request) => {
+    const state = request.body?.state === "trash" ? "trash" : "active";
+    const fileName = requireArchiveFileName(request.body?.fileName);
+    const payload = await previewCodexArchiveSession(state, fileName);
+    return payload;
+  });
+
+  app.post<{ Body: CodexArchiveActionBody }>("/api/codex-archive/delete", async (request) => {
+    const state = request.body?.state === "trash" ? "trash" : "active";
+    if (state !== "active") {
+      throw httpError(400, "Delete only supports state=active.");
+    }
+    const fileName = requireArchiveFileName(request.body?.fileName);
+    const item = await moveCodexArchiveSessionToTrash(fileName);
+    return { state: "trash", item };
+  });
+
+  app.post<{ Body: CodexArchiveActionBody }>("/api/codex-archive/restore", async (request) => {
+    const state = request.body?.state === "active" ? "active" : "trash";
+    if (state !== "trash") {
+      throw httpError(400, "Restore only supports state=trash.");
+    }
+    const fileName = requireArchiveFileName(request.body?.fileName);
+    const item = await restoreCodexArchiveSession(fileName);
+    return { state: "active", item };
   });
 
   app.post<{ Body: { skillId?: string; invokedAt?: string } }>("/api/record", async (request) => {
@@ -267,12 +333,17 @@ export async function startServer(options: ServerOptions = {}): Promise<{ url: s
 
   app.post("/api/pull", async () => {
     const loaded = requireConfig(config);
-    await gitPull(loaded.syncRepo);
-    return {
-      pulled: true,
-      gitStatus: await gitStatus(loaded.syncRepo),
-      gitBranchStatus: await gitBranchSyncStatus(loaded.syncRepo)
-    };
+    return pullRepositoryChanges(loaded);
+  });
+
+  app.get("/api/repo-conflicts", async () => {
+    const loaded = requireConfig(config);
+    return listRepositoryConflicts(loaded);
+  });
+
+  app.post<{ Body: RepoConflictResolveBody }>("/api/repo-conflicts/resolve", async (request) => {
+    const loaded = requireConfig(config);
+    return resolveRepositoryConflicts(loaded, requireRepoConflictResolutions(request.body));
   });
 
   app.post<{ Body: SkillActionBody }>("/api/skill-file", async (request) => {
@@ -404,6 +475,25 @@ function requireSyncSelections(body: SyncBody | undefined): SyncSelection[] {
   }));
 }
 
+function requireRepoConflictResolutions(body: RepoConflictResolveBody | undefined): RepositoryConflictResolution[] {
+  if (!body || !Array.isArray(body.resolutions)) {
+    throw httpError(400, "Request body must include resolutions.");
+  }
+
+  return body.resolutions.map((resolution) => ({
+    skillId: requireSkillId(resolution),
+    source: requireRepositoryConflictSource(resolution.source)
+  }));
+}
+
+function requireRepositoryConflictSource(value: unknown): RepositoryConflictSource {
+  if (value === "github" || value === "syncRepo" || value === "codex" || value === "agents") {
+    return value;
+  }
+
+  throw httpError(400, "Repository conflict source must be github, syncRepo, codex, or agents.");
+}
+
 function requireBulkActionEndpoint(value: unknown): "import" | "install" | "update-local" {
   if (value === "import" || value === "install" || value === "update-local") {
     return value;
@@ -444,6 +534,19 @@ function optionalDate(value: unknown): string | undefined {
   }
 
   return trimmed;
+}
+
+function requireArchiveFileName(value: unknown): string {
+  if (typeof value !== "string") {
+    throw httpError(400, "Request body must include a valid fileName.");
+  }
+
+  try {
+    return validateCodexArchiveFileName(value.trim());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid file name.";
+    throw httpError(400, message);
+  }
 }
 
 function requireResolveStrategy(value: unknown): "codex" | "agents" | "repo" {

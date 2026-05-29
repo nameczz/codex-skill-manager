@@ -1,89 +1,58 @@
 import * as React from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
 
-type DialogContextValue = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-};
+export const Dialog = DialogPrimitive.Root;
+export const DialogTrigger = DialogPrimitive.Trigger;
+export const DialogPortal = DialogPrimitive.Portal;
+export const DialogClose = DialogPrimitive.Close;
 
-const DialogContext = React.createContext<DialogContextValue | null>(null);
+export const DialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay ref={ref} className={cn("drawer-backdrop", className)} {...props} />
+));
 
-export function Dialog({
-  open,
-  onOpenChange,
-  children
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  children: React.ReactNode;
-}) {
-  return <DialogContext.Provider value={{ open, onOpenChange }}>{children}</DialogContext.Provider>;
-}
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
-function useDialogContext() {
-  const value = React.useContext(DialogContext);
-  if (value === null) {
-    throw new Error("Dialog subcomponents must be used within <Dialog />.");
-  }
-  return value;
-}
+export const DialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { showClose?: boolean }
+>(({ className, children, showClose = false, ...props }, ref) => (
+  <DialogPrimitive.Content ref={ref} className={cn(className)} {...props}>
+    {children}
+    {showClose ? (
+      <DialogPrimitive.Close className="dialog-close" aria-label="Close">
+        <X size={16} aria-hidden="true" />
+      </DialogPrimitive.Close>
+    ) : null}
+  </DialogPrimitive.Content>
+));
 
-type DialogPortalProps = {
-  children: React.ReactNode;
-};
+DialogContent.displayName = DialogPrimitive.Content.displayName;
 
-export function DialogPortal({ children }: DialogPortalProps) {
-  const { open } = useDialogContext();
-  if (!open) {
-    return null;
-  }
+export const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("drawer-header", className)} {...props} />
+);
 
-  return <div className="dialog-portal">{children}</div>;
-}
+export const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("editor-footer", className)} {...props} />
+);
 
-type DialogOverlayProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+export const DialogTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => <DialogPrimitive.Title ref={ref} className={cn(className)} {...props} />);
 
-export function DialogOverlay({ className, ...props }: DialogOverlayProps) {
-  const { open, onOpenChange } = useDialogContext();
-  if (!open) {
-    return null;
-  }
+DialogTitle.displayName = DialogPrimitive.Title.displayName;
 
-  return (
-    <button
-      type="button"
-      className={cn("drawer-backdrop", className)}
-      aria-label="Close"
-      tabIndex={-1}
-      onClick={() => onOpenChange(false)}
-      {...props}
-    />
-  );
-}
+export const DialogDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description ref={ref} className={cn("card-description", className)} {...props} />
+));
 
-type DialogContentProps = React.HTMLAttributes<HTMLDivElement>;
-
-export function DialogContent({ className, ...props }: DialogContentProps) {
-  const { open } = useDialogContext();
-  if (!open) {
-    return null;
-  }
-
-  return <div role="dialog" aria-modal="true" className={cn(className)} {...props} />;
-}
-
-export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("drawer-header", className)} {...props} />;
-}
-
-export function DialogTitle({ className, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn(className)} {...props} />;
-}
-
-export function DialogDescription({ className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cn("card-description", className)} {...props} />;
-}
-
-export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("editor-footer", className)} {...props} />;
-}
+DialogDescription.displayName = DialogPrimitive.Description.displayName;

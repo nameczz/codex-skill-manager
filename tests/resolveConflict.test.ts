@@ -55,7 +55,6 @@ describe("resolveConflict", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -119,7 +118,6 @@ describe("resolveConflict", () => {
         lastUsedAt: null,
         createdAt: now,
         updatedAt: now,
-        archivedAt: null
       };
       await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
 
@@ -176,7 +174,6 @@ describe("resolveConflict", () => {
       lastUsedAt: null,
       createdAt: now,
       updatedAt: now,
-      archivedAt: null
     };
     await writeSkillsMetadata(syncRepo, { schemaVersion: 1, skills: [record] });
 

@@ -1,4 +1,4 @@
-export type SkillStatus = "managed" | "archived";
+export type SkillStatus = "managed";
 
 export type SyncState =
   | "clean"
@@ -8,10 +8,8 @@ export type SyncState =
   | "missing_local"
   | "missing_repo";
 
-export type ArchiveCopyStatus = "present" | "missing";
-
 export type LocalSkillSource = "codex" | "agents";
-export type ScanSource = LocalSkillSource | "repo" | "archive";
+export type ScanSource = LocalSkillSource | "repo";
 
 export type LocalConfig = {
   schemaVersion: 1;
@@ -46,10 +44,6 @@ export type SkillRecord = {
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  archivedAt: string | null;
-  archivePath?: string;
-  archiveCopyStatus?: ArchiveCopyStatus;
-  archiveHash?: string | null;
 };
 
 export type SkillsMetadata = {
@@ -107,5 +101,4 @@ export type StatusReport = {
   managed: SkillRecord[];
   unmanagedLocal: ScannedSkill[];
   repoOnly: ScannedSkill[];
-  archived: SkillRecord[];
 };

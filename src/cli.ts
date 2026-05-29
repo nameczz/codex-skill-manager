@@ -6,12 +6,12 @@ import { buildStatusReport } from "./status.js";
 import { formatStatus } from "./format.js";
 import { importLocalSkill } from "./importSkill.js";
 import { installRepoSkill } from "./installSkill.js";
-import { gitBranchSyncStatus, gitPull, gitStatus } from "./git.js";
+import { gitBranchSyncStatus, gitStatus } from "./git.js";
 import { startServer } from "./server.js";
-import { syncSelectedSkills } from "./sync.js";
+import { pullRepositoryChanges, syncRepositoryChanges, syncSelectedSkills } from "./sync.js";
 import { recordUsageEvent } from "./usage.js";
 import { removeLocalSkill } from "./removeLocalSkill.js";
-import { archiveSkill } from "./archiveSkill.js";
+import { stopSyncingSkill } from "./stopSyncingSkill.js";
 import { updateLocalSkill } from "./updateLocalSkill.js";
 
 const program = new Command();
@@ -128,7 +128,10 @@ program
   .description("Pull latest changes from the sync repository (fast-forward only).")
   .action(async () => {
     const config = await loadLocalConfig();
-    await gitPull(config.syncRepo);
+    const result = await pullRepositoryChanges(config);
+    if (result.preSync?.committed) {
+      console.log(`Committed local repository changes as ${result.preSync.commitHash}.`);
+    }
     console.log("Pulled latest changes.");
   });
 
@@ -170,13 +173,19 @@ program
   });
 
 program
-  .command("archive")
+  .command("stop-syncing")
   .argument("<skill-id>")
-  .description("Archive a managed skill in the sync repository.")
+  .description("Stop syncing a managed skill from the sync repository.")
   .action(async (skillId) => {
     const config = await loadLocalConfig();
-    const record = await archiveSkill(config, skillId);
-    console.log(`Archived ${record.id}`);
+    const record = await stopSyncingSkill(config, skillId);
+    const result = await syncRepositoryChanges(config);
+    console.log(`Stopped syncing ${record.id}`);
+    if (result.committed && result.commitHash) {
+      console.log(`Commit ${result.commitHash} pushed to sync repository.`);
+    } else {
+      console.log("No repository commit required.");
+    }
   });
 
 function resolveSourceOption(value: string | undefined): "codex" | "agents" | undefined {

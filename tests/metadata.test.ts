@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ describe("repo metadata", () => {
     await ensureRepoMetadata(syncRepo);
 
     await expect(readFile(path.join(syncRepo, ".gitignore"), "utf8")).resolves.toContain(".codex-skill-manager/");
+    expect(existsSync(path.join(syncRepo, "archive"))).toBe(false);
   });
 
   it("preserves existing gitignore entries", async () => {
@@ -45,7 +47,6 @@ describe("repo metadata", () => {
             currentLocalHash: "abc",
             createdAt: "2026-01-01T00:00:00.000Z",
             updatedAt: "2026-01-01T00:00:00.000Z",
-            archivedAt: null
           }
         ]
       }),

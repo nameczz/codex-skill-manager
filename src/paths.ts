@@ -56,12 +56,15 @@ export function repoSkillsDir(syncRepo: string): string {
   return path.join(syncRepo, "skills");
 }
 
-export function repoArchiveDir(syncRepo: string): string {
-  return path.join(syncRepo, "archive");
-}
-
 export function repoMetadataDir(syncRepo: string): string {
   return path.join(syncRepo, "metadata");
+}
+
+export function getDefaultCodexArchiveSessionsDir(options: PathOptions = {}): string {
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? homedir();
+  const codexHome = path.resolve(expandHome(env.CSM_CODEX_HOME ?? env.CODEX_HOME ?? "~/.codex", home));
+  return path.join(codexHome, "archived_sessions");
 }
 
 export function repoSettingsPath(syncRepo: string): string {

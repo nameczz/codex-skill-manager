@@ -6,16 +6,14 @@ export type SyncState =
   | "missing_local"
   | "missing_repo";
 
-export type ArchiveCopyStatus = "present" | "missing";
-
 export type LocalSkillSource = "codex" | "agents";
-export type ScanSource = LocalSkillSource | "repo" | "archive";
+export type ScanSource = LocalSkillSource | "repo";
 
 export type SkillRecord = {
   id: string;
   name: string;
   description: string;
-  status: "managed" | "archived";
+  status: "managed";
   localSource?: LocalSkillSource | null;
   localSources?: LocalSkillSource[];
   localCopiesDiffer?: boolean;
@@ -28,10 +26,6 @@ export type SkillRecord = {
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  archivedAt: string | null;
-  archivePath?: string;
-  archiveCopyStatus?: ArchiveCopyStatus;
-  archiveHash?: string | null;
 };
 
 export type ScannedSkill = {
@@ -52,7 +46,31 @@ export type StatusReport = {
   managed: SkillRecord[];
   unmanagedLocal: ScannedSkill[];
   repoOnly: ScannedSkill[];
-  archived: SkillRecord[];
+};
+
+export type CodexArchiveState = "active" | "trash";
+
+export type CodexArchiveSession = {
+  fileName: string;
+  sessionId: string;
+  title: string;
+  archivedAt: string | null;
+  updatedAt: string | null;
+  cwd: string | null;
+  source: string | null;
+  fileSize: number;
+};
+
+export type CodexArchiveListResponse = {
+  state: CodexArchiveState;
+  items: Array<CodexArchiveSession>;
+};
+
+export type CodexArchivePreviewResponse = {
+  state: CodexArchiveState;
+  item: CodexArchiveSession;
+  preview: string[];
+  truncated: boolean;
 };
 
 export type AutoSyncStatus = {
@@ -78,6 +96,7 @@ export type UsageMonitorStatus = {
 };
 
 export type SkillVersionSource = LocalSkillSource | "repo";
+export type RepoConflictSource = LocalSkillSource | "github" | "syncRepo";
 
 export type SkillVersion = {
   source: SkillVersionSource;
@@ -88,6 +107,25 @@ export type SkillVersion = {
 
 export type SkillVersionsResponse = {
   versions: SkillVersion[];
+};
+
+export type RepoConflictVersion = {
+  source: RepoConflictSource;
+  label: string;
+  path: string;
+  exists: boolean;
+  content: string | null;
+};
+
+export type RepoSkillConflict = {
+  skillId: string;
+  files: string[];
+  versions: RepoConflictVersion[];
+};
+
+export type RepoConflictsResponse = {
+  gitBranchStatus: GitBranchSyncStatus;
+  conflicts: RepoSkillConflict[];
 };
 
 export type GitBranchSyncState = "up-to-date" | "ahead" | "behind" | "diverged" | "no-upstream" | "unknown";
@@ -156,7 +194,7 @@ export type SkillRow =
       description: string;
       syncState: SyncState;
       installed: boolean;
-      status: "managed" | "archived";
+      status: "managed";
       source: SkillRowSource;
       localSources: LocalSkillSource[];
       localCopiesDiffer: boolean;

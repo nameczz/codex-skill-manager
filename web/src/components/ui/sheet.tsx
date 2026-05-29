@@ -5,8 +5,8 @@ import {
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogPortal,
   DialogOverlay,
+  DialogPortal,
   DialogTitle
 } from "./dialog";
 
